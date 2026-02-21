@@ -1,0 +1,1 @@
+console.log("[theme/darkmode.js] tema: dark mode etkin");

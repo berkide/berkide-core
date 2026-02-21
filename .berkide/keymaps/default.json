@@ -1,0 +1,10 @@
+{
+  "Ctrl+S": "buffer.save",
+  "Ctrl+O": "buffer.open",
+  "Ctrl+N": "buffer.new",
+  "Ctrl+W": "buffer.close",
+  "Ctrl+Z": "buffer.undo",
+  "Ctrl+Y": "buffer.redo",
+  "Ctrl+P": "file.info",
+  "Ctrl+Shift+S": "buffer.saveAs"
+}

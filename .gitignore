@@ -1,41 +1,13 @@
-# Prerequisites
-*.d
+# V8 kaynakları ve build output
+third_party/v8/.git/
+third_party/v8/out.gn/
+third_party/v8/depot_tools/
+third_party/v8/.gclient*
+third_party/v8/.gitignore
+third_party/v8/.cipd
+third_party/v8/vendor
+third_party/v8/v8
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+build/
+.vscode/
 
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# debug information files
-*.dwo

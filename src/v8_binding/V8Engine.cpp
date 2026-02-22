@@ -1,3 +1,8 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "V8Engine.h"
 #include "EditorBinding.h"
 #include "BindingRegistry.h"
@@ -56,10 +61,6 @@ bool V8Engine::initialize()
         EditorContext dummy;
         BindEditor(isolate_, ctx, dummy);
     }
-
-    // Create editor.commands JS object with register/exec methods
-    // editor.commands JS nesnesini register/exec metodlariyla olustur
-    bindCommandsAPI(ctx);
 
     // Register built-in native commands (move, insert, delete, etc.)
     // Yerlesik native komutlari kaydet (move, insert, delete, vb.)
@@ -425,75 +426,6 @@ bool V8Engine::loadAllScripts(const std::string &dirPath, bool recursive)
     LOG_INFO("[V8] ", count, " modules loaded (", dirPath, ")");
     return count > 0;
 }
-// Start a background thread that watches plugin directory for .js/.mjs file changes and hot-reloads them
-// Plugin dizinini izleyen bir arka plan thread'i baslat, .js/.mjs dosya degisikliklerini algilayip otomatik yukle
-void V8Engine::startPluginWatcher(const std::string &dirPath)
-{
-    if (watching_)
-        return;
-    watching_ = true;
-
-    LOG_INFO("[V8] Plugin watcher started (", dirPath, ")");
-
-    watcherThread_ = std::thread([this, dirPath]()
-                                 {
-    using namespace std::chrono_literals;
-
-    while (watching_) {
-        std::this_thread::sleep_for(1000ms);
-
-        try {
-            if (!std::filesystem::exists(dirPath)) continue;
-
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(dirPath)) {
-                if (!entry.is_regular_file()) continue;
-                auto ext = entry.path().extension().string();
-                if (ext != ".js" && ext != ".mjs") continue;
-
-                auto path = entry.path().string();
-                auto lastWrite = std::filesystem::last_write_time(entry);
-
-                auto it = pluginTimestamps_.find(path);
-                if (it == pluginTimestamps_.end()) {
-                    pluginTimestamps_[path] = lastWrite;
-                    continue;
-                }
-
-                if (lastWrite != it->second) {
-                    it->second = lastWrite;
-                    LOG_INFO("[V8] Plugin changed, reloading: ", path);
-
-                    // Invalidate module cache and reload as ES6 module
-                    // Modul onbellegini gecersiz kil ve ES6 modul olarak yeniden yukle
-                    try {
-                        auto canonical = fs::canonical(path).string();
-                        moduleCache_.erase(canonical);
-                    } catch (...) {}
-                    loadModule(path);
-                }
-            }
-        } catch (const std::exception& e) {
-            LOG_ERROR("[V8] Watcher error: ", e.what());
-        }
-    } });
-}
-
-// Stop the plugin watcher background thread
-// Plugin izleyici arka plan thread'ini durdur
-void V8Engine::stopPluginWatcher()
-{
-    if (!watching_)
-        return;
-    watching_ = false;
-
-    if (watcherThread_.joinable())
-    {
-        watcherThread_.join();
-    }
-
-    LOG_INFO("[V8] Plugin watcher stopped");
-}
-
 // Reload a single named binding (e.g. "buffer", "cursor") on the editor JS object
 // editor JS nesnesi uzerinde tek bir binding'i (orn. "buffer", "cursor") yeniden yukle
 bool V8Engine::reloadBinding(const std::string &name)
@@ -547,7 +479,8 @@ void V8Engine::injectConsole(v8::Local<v8::Context> ctx)
     console->Set(ctx,
         v8::String::NewFromUtf8Literal(isolate, "log"),
         v8::Function::New(ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            LOG_INFO("[JS] ", collectJsArgs(args));
+            auto* eng = static_cast<V8Engine*>(args.GetIsolate()->GetData(0));
+            LOG_INFO("[JS] ", eng->pluginTag().empty() ? "" : eng->pluginTag() + "  ", collectJsArgs(args));
         }).ToLocalChecked()
     ).Check();
 
@@ -555,7 +488,8 @@ void V8Engine::injectConsole(v8::Local<v8::Context> ctx)
     console->Set(ctx,
         v8::String::NewFromUtf8Literal(isolate, "warn"),
         v8::Function::New(ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            LOG_WARN("[JS] ", collectJsArgs(args));
+            auto* eng = static_cast<V8Engine*>(args.GetIsolate()->GetData(0));
+            LOG_WARN("[JS] ", eng->pluginTag().empty() ? "" : eng->pluginTag() + "  ", collectJsArgs(args));
         }).ToLocalChecked()
     ).Check();
 
@@ -563,7 +497,8 @@ void V8Engine::injectConsole(v8::Local<v8::Context> ctx)
     console->Set(ctx,
         v8::String::NewFromUtf8Literal(isolate, "error"),
         v8::Function::New(ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            LOG_ERROR("[JS] ", collectJsArgs(args));
+            auto* eng = static_cast<V8Engine*>(args.GetIsolate()->GetData(0));
+            LOG_ERROR("[JS] ", eng->pluginTag().empty() ? "" : eng->pluginTag() + "  ", collectJsArgs(args));
         }).ToLocalChecked()
     ).Check();
 
@@ -571,7 +506,8 @@ void V8Engine::injectConsole(v8::Local<v8::Context> ctx)
     console->Set(ctx,
         v8::String::NewFromUtf8Literal(isolate, "debug"),
         v8::Function::New(ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            LOG_DEBUG("[JS] ", collectJsArgs(args));
+            auto* eng = static_cast<V8Engine*>(args.GetIsolate()->GetData(0));
+            LOG_DEBUG("[JS] ", eng->pluginTag().empty() ? "" : eng->pluginTag() + "  ", collectJsArgs(args));
         }).ToLocalChecked()
     ).Check();
 
@@ -601,101 +537,6 @@ std::string V8Engine::readFile(const std::string &path)
     std::ostringstream oss;
     oss << ifs.rdbuf();
     return oss.str();
-}
-
-// Bind editor.commands API: __nativeExec, register, exec for JS command dispatch
-// editor.commands API'sini bagla: JS komut yonlendirmesi icin __nativeExec, register, exec
-void V8Engine::bindCommandsAPI(v8::Local<v8::Context> ctx)
-{
-    v8::Isolate *isolate = isolate_;
-
-    v8::Local<v8::String> editorKey = v8::String::NewFromUtf8Literal(isolate, "editor");
-    v8::Local<v8::Object> editor;
-    if (!ctx->Global()->Has(ctx, editorKey).FromMaybe(false))
-    {
-        editor = v8::Object::New(isolate);
-        ctx->Global()->Set(ctx, editorKey, editor).Check();
-    }
-    else
-    {
-        editor = ctx->Global()->Get(ctx, editorKey).ToLocalChecked().As<v8::Object>();
-    }
-
-    v8::Local<v8::Object> commands = v8::Object::New(isolate);
-
-    // Native exec callback: routes JS command calls to the C++ CommandRouter
-    // Native exec callback: JS komut cagrilarini C++ CommandRouter'a yonlendirir
-    auto nativeExecFn = v8::Function::New(
-                            ctx,
-                            [](const v8::FunctionCallbackInfo<v8::Value> &info)
-                            {
-                                if (info.Length() < 1)
-                                    return;
-                                auto isolate = info.GetIsolate();
-                                v8::HandleScope handle_scope(isolate);
-
-                                v8::String::Utf8Value name(isolate, info[0]);
-                                std::string cmdName = *name ? *name : "";
-
-                                std::string argsStr = "{}";
-                                if (info.Length() > 1 && info[1]->IsString())
-                                {
-                                    v8::String::Utf8Value argsUtf8(isolate, info[1]);
-                                    argsStr = *argsUtf8 ? *argsUtf8 : "{}";
-                                }
-
-                                auto *self = static_cast<V8Engine *>(isolate->GetData(0));
-                                std::string result = self->commandRouter().execFromJS(cmdName, argsStr);
-
-                                info.GetReturnValue().Set(
-                                    v8::String::NewFromUtf8(isolate, result.c_str()).ToLocalChecked());
-                            })
-                            .ToLocalChecked();
-
-    commands->Set(ctx,
-                  v8::String::NewFromUtf8Literal(isolate, "__nativeExec"),
-                  nativeExecFn)
-        .Check();
-
-    commands->Set(ctx,
-                  v8::String::NewFromUtf8Literal(isolate, "register"),
-                  v8::Function::New(ctx, [](const v8::FunctionCallbackInfo<v8::Value> &info) {}).ToLocalChecked())
-        .Check();
-
-    commands->Set(ctx,
-                  v8::String::NewFromUtf8Literal(isolate, "exec"),
-                  v8::Function::New(ctx, [](const v8::FunctionCallbackInfo<v8::Value> &info) {}).ToLocalChecked())
-        .Check();
-
-    // commands.list() — return all registered command names as JS array
-    // commands.list() — tum kayitli komut adlarini JS dizisi olarak dondur
-    commands->Set(ctx,
-                  v8::String::NewFromUtf8Literal(isolate, "list"),
-                  v8::Function::New(ctx, [](const v8::FunctionCallbackInfo<v8::Value> &args) {
-                      auto* isolate = args.GetIsolate();
-                      auto ctx = isolate->GetCurrentContext();
-                      auto* self = static_cast<V8Engine*>(isolate->GetData(0));
-                      json all = self->listCommands();
-                      v8::Local<v8::Array> arr = v8::Array::New(isolate);
-                      uint32_t idx = 0;
-                      for (auto& name : all["commands"]) {
-                          arr->Set(ctx, idx++,
-                              v8::String::NewFromUtf8(isolate, name.get<std::string>().c_str()).ToLocalChecked()).Check();
-                      }
-                      for (auto& name : all["queries"]) {
-                          arr->Set(ctx, idx++,
-                              v8::String::NewFromUtf8(isolate, name.get<std::string>().c_str()).ToLocalChecked()).Check();
-                      }
-                      args.GetReturnValue().Set(arr);
-                  }).ToLocalChecked())
-        .Check();
-
-    editor->Set(ctx,
-                v8::String::NewFromUtf8Literal(isolate, "commands"),
-                commands)
-        .Check();
-
-    LOG_INFO("[V8] Commands API bound");
 }
 
 // Dispatch a command: try native router first, then fall back to JS editor.commands.exec

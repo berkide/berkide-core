@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "ProcessBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "ProcessManager.h"
 #include "V8Engine.h"
 #include <v8.h>
@@ -12,6 +18,13 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
     return *s ? *s : "";
 }
 
+// Context struct to pass process manager pointer and i18n to lambda callbacks
+// Lambda callback'lere hem surec yoneticisi hem i18n isaretcisini aktarmak icin baglam yapisi
+struct ProcessCtx {
+    ProcessManager* pm;
+    I18n* i18n;
+};
+
 // Register editor.process JS object with spawn, write, kill, signal, closeStdin, list,
 // onStdout, onStderr, onExit
 // editor.process JS nesnesini spawn, write, kill, signal, closeStdin, list,
@@ -19,16 +32,23 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
 void RegisterProcessBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& ctx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsProcess = v8::Object::New(isolate);
-    ProcessManager* pm = ctx.processManager;
 
-    // process.spawn(command, args?, opts?) -> processId
+    auto* pctx = new ProcessCtx{ctx.processManager, ctx.i18n};
+
+    // process.spawn(command, args?, opts?) -> {ok, data: processId, ...}
     // Yeni bir alt surec baslat ve surec kimligini dondur
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "spawn"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "command"}}, pc->i18n);
+                return;
+            }
             auto* isolate = args.GetIsolate();
             auto ctx = isolate->GetCurrentContext();
 
@@ -71,126 +91,163 @@ void RegisterProcessBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
                 }
             }
 
-            int id = pm->spawn(command, cmdArgs, opts);
-            args.GetReturnValue().Set(v8::Integer::New(isolate, id));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            int id = pc->pm->spawn(command, cmdArgs, opts);
+            V8Response::ok(args, id);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // process.write(id, data) -> bool
+    // process.write(id, data) -> {ok, data: bool, ...}
     // Surecin stdin'ine veri yaz
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "write"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id, data"}}, pc->i18n);
+                return;
+            }
             int id = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             std::string data = v8Str(args.GetIsolate(), args[1]);
-            bool ok = pm->write(id, data);
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool ok = pc->pm->write(id, data);
+            V8Response::ok(args, ok);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // process.closeStdin(id) -> bool
+    // process.closeStdin(id) -> {ok, data: bool, ...}
     // Surecin stdin pipe'ini kapat (EOF gonder)
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "closeStdin"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id"}}, pc->i18n);
+                return;
+            }
             int id = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            bool ok = pm->closeStdin(id);
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool ok = pc->pm->closeStdin(id);
+            V8Response::ok(args, ok);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // process.kill(id) -> bool
+    // process.kill(id) -> {ok, data: bool, ...}
     // Sureci zorla oldur
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "kill"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id"}}, pc->i18n);
+                return;
+            }
             int id = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            bool ok = pm->kill(id);
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool ok = pc->pm->kill(id);
+            V8Response::ok(args, ok);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // process.signal(id, signum) -> bool
+    // process.signal(id, signum) -> {ok, data: bool, ...}
     // Surece sinyal gonder (orn: 15=SIGTERM, 9=SIGKILL)
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "signal"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id, signum"}}, pc->i18n);
+                return;
+            }
             auto ctx = args.GetIsolate()->GetCurrentContext();
             int id  = args[0]->Int32Value(ctx).FromMaybe(0);
             int sig = args[1]->Int32Value(ctx).FromMaybe(15);
-            bool ok = pm->signal(id, sig);
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool ok = pc->pm->signal(id, sig);
+            V8Response::ok(args, ok);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // process.isRunning(id) -> bool
+    // process.isRunning(id) -> {ok, data: bool, ...}
     // Surecin calismakta olup olmadigini kontrol et
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "isRunning"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id"}}, pc->i18n);
+                return;
+            }
             int id = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), pm->isRunning(id)));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool running = pc->pm->isRunning(id);
+            V8Response::ok(args, running);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // process.list() -> [{id, pid, running, exitCode}]
+    // process.list() -> {ok, data: [{id, pid, running, exitCode}, ...], meta: {total: N}}
     // Tum surecleri listele
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
-            auto* isolate = args.GetIsolate();
-            auto ctx = isolate->GetCurrentContext();
-
-            auto procs = pm->list();
-            v8::Local<v8::Array> arr = v8::Array::New(isolate, static_cast<int>(procs.size()));
-            for (size_t i = 0; i < procs.size(); ++i) {
-                v8::Local<v8::Object> obj = v8::Object::New(isolate);
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "id"),
-                    v8::Integer::New(isolate, procs[i].id)).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "pid"),
-                    v8::Integer::New(isolate, static_cast<int>(procs[i].pid))).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "running"),
-                    v8::Boolean::New(isolate, procs[i].running)).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "exitCode"),
-                    v8::Integer::New(isolate, procs[i].exitCode)).Check();
-                arr->Set(ctx, static_cast<uint32_t>(i), obj).Check();
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+
+            auto procs = pc->pm->list();
+            json arr = json::array();
+            for (const auto& p : procs) {
+                arr.push_back(json({
+                    {"id", p.id},
+                    {"pid", static_cast<int>(p.pid)},
+                    {"running", p.running},
+                    {"exitCode", p.exitCode}
+                }));
+            }
+            json meta = {{"total", procs.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
     // process.onStdout(id, callback) - Set stdout callback
     // Stdout verisi icin geri cagirim ayarla
+    // NOTE: Callback registration returns standard response, but the callback itself remains raw
+    // NOT: Callback kaydi standart yanit dondurur, ancak callback'in kendisi ham kalir
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "onStdout"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2 || !args[1]->IsFunction()) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2 || !args[1]->IsFunction()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id, callback"}}, pc->i18n);
+                return;
+            }
             auto* isolate = args.GetIsolate();
             int id = args[0]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
 
             auto cb = std::make_shared<v8::Global<v8::Function>>(isolate, args[1].As<v8::Function>());
             auto ctxG = std::make_shared<v8::Global<v8::Context>>(isolate, isolate->GetCurrentContext());
 
-            pm->onStdout(id, [cb, ctxG, isolate](int procId, const std::string& data) {
+            pc->pm->onStdout(id, [cb, ctxG, isolate](int procId, const std::string& data) {
                 auto* engine = static_cast<V8Engine*>(isolate->GetData(0));
                 struct Task : v8::Task {
                     v8::Isolate* iso;
@@ -219,24 +276,34 @@ void RegisterProcessBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
                 task->id = procId;
                 engine->platform()->GetForegroundTaskRunner(isolate)->PostTask(std::move(task));
             });
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
     // process.onStderr(id, callback) - Set stderr callback
     // Stderr verisi icin geri cagirim ayarla
+    // NOTE: Callback registration returns standard response, but the callback itself remains raw
+    // NOT: Callback kaydi standart yanit dondurur, ancak callback'in kendisi ham kalir
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "onStderr"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2 || !args[1]->IsFunction()) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2 || !args[1]->IsFunction()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id, callback"}}, pc->i18n);
+                return;
+            }
             auto* isolate = args.GetIsolate();
             int id = args[0]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
 
             auto cb = std::make_shared<v8::Global<v8::Function>>(isolate, args[1].As<v8::Function>());
             auto ctxG = std::make_shared<v8::Global<v8::Context>>(isolate, isolate->GetCurrentContext());
 
-            pm->onStderr(id, [cb, ctxG, isolate](int procId, const std::string& data) {
+            pc->pm->onStderr(id, [cb, ctxG, isolate](int procId, const std::string& data) {
                 auto* engine = static_cast<V8Engine*>(isolate->GetData(0));
                 struct Task : v8::Task {
                     v8::Isolate* iso;
@@ -261,24 +328,34 @@ void RegisterProcessBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
                 task->data = data;
                 engine->platform()->GetForegroundTaskRunner(isolate)->PostTask(std::move(task));
             });
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
     // process.onExit(id, callback) - Set exit callback
     // Surec cikisi icin geri cagirim ayarla
+    // NOTE: Callback registration returns standard response, but the callback itself remains raw
+    // NOT: Callback kaydi standart yanit dondurur, ancak callback'in kendisi ham kalir
     jsProcess->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "onExit"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2 || !args[1]->IsFunction()) return;
-            auto* pm = static_cast<ProcessManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<ProcessCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2 || !args[1]->IsFunction()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "id, callback"}}, pc->i18n);
+                return;
+            }
             auto* isolate = args.GetIsolate();
             int id = args[0]->Int32Value(isolate->GetCurrentContext()).FromMaybe(0);
 
             auto cb = std::make_shared<v8::Global<v8::Function>>(isolate, args[1].As<v8::Function>());
             auto ctxG = std::make_shared<v8::Global<v8::Context>>(isolate, isolate->GetCurrentContext());
 
-            pm->onExit(id, [cb, ctxG, isolate](int procId, int exitCode) {
+            pc->pm->onExit(id, [cb, ctxG, isolate](int procId, int exitCode) {
                 auto* engine = static_cast<V8Engine*>(isolate->GetData(0));
                 struct Task : v8::Task {
                     v8::Isolate* iso;
@@ -303,7 +380,9 @@ void RegisterProcessBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
                 task->exitCode = exitCode;
                 engine->platform()->GetForegroundTaskRunner(isolate)->PostTask(std::move(task));
             });
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

@@ -1,3 +1,8 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #pragma once
 #include <memory>
 #include <string>
@@ -70,13 +75,7 @@ public:
     // Ismiyle tek bir binding'i yeniden yukle
     bool reloadBinding(const std::string& name);
 
-    // Start file watcher for plugin hot-reload
-    // Eklenti anlik yeniden yuklemesi icin dosya izleyicisini baslat
-    void startPluginWatcher(const std::string& dirPath = "plugins");
 
-    // Stop the plugin file watcher
-    // Eklenti dosya izleyicisini durdur
-    void stopPluginWatcher();
 
     // Access the command router for registering/executing commands
     // Komut kaydetme/calistirma icin komut yonlendiricisine eris
@@ -89,6 +88,10 @@ public:
     // List all registered commands and queries
     // Tum kayitli komutlari ve sorgulari listele
     json listCommands() const;
+
+    // Resolve a module/file specifier to an absolute path relative to the referrer
+    // Modul/dosya belirleyicisini referrer'a goreceli mutlak yola cozumle
+    static std::string resolveModulePath(const std::string& specifier, const std::string& referrerPath);
 
     // Global singleton access
     // Global tekil erisim
@@ -127,10 +130,6 @@ private:
     // Global 'editor' nesnesini yeniden kur (sil ve tum binding'lerle yeniden olustur)
     void rebuildEditorObject(v8::Local<v8::Context> ctx);
 
-    // Bind the commands API (editor.commands) into the V8 context
-    // Komutlar API'sini (editor.commands) V8 baglamina bagla
-    void bindCommandsAPI(v8::Local<v8::Context> ctx);
-
     // Inject setTimeout/clearTimeout into the V8 context
     // V8 baglamina setTimeout/clearTimeout enjekte et
     void injectTimers(v8::Local<v8::Context> ctx);
@@ -141,12 +140,6 @@ private:
     v8::ArrayBuffer::Allocator* allocator_ = nullptr;
     v8::Isolate* isolate_ = nullptr;
     v8::Global<v8::Context> context_;
-
-    // Plugin file watcher state
-    // Eklenti dosya izleyicisi durumu
-    std::atomic<bool> watching_{false};
-    std::thread watcherThread_;
-    std::unordered_map<std::string, std::filesystem::file_time_type> pluginTimestamps_;
 
     // Command system
     // Komut sistemi
@@ -160,6 +153,14 @@ private:
     // Editor context pointer (set by main.cpp)
     // Editor baglam isaretcisi (main.cpp tarafindan ayarlanir)
     EditorContext* edCtx_ = nullptr;
+
+    // Plugin tag for console output (empty = plain [JS], non-empty = appended after [JS])
+    // Console ciktisi icin plugin etiketi (bos = duz [JS], dolu = [JS] sonrasina eklenir)
+    std::string pluginTag_;
+public:
+    void setPluginTag(const std::string& tag) { pluginTag_ = tag; }
+    const std::string& pluginTag() const { return pluginTag_; }
+private:
 
     // Timer management for setTimeout/clearTimeout
     // setTimeout/clearTimeout icin zamanlayici yonetimi
@@ -175,7 +176,6 @@ private:
     static v8::MaybeLocal<v8::Module> resolveModuleCallback(
         v8::Local<v8::Context> context, v8::Local<v8::String> specifier,
         v8::Local<v8::FixedArray> import_assertions, v8::Local<v8::Module> referrer);
-    std::string resolveModulePath(const std::string& specifier, const std::string& referrerPath);
     v8::MaybeLocal<v8::Module> compileModule(const std::string& path, const std::string& source);
     std::unordered_map<std::string, v8::Global<v8::Module>> moduleCache_;
     std::unordered_map<int, std::string> moduleIdToPath_;

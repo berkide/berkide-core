@@ -1,4 +1,10 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "CommandRegistry.h"
+#include "ApiResponse.h"
 #include "Logger.h"
 
 // Register a named mutation command with its handler function (thread-safe)
@@ -34,8 +40,8 @@ bool CommandRegistry::execute(const std::string& name, const json& args) {
     return result.value("ok", false);
 }
 
-// Execute command or query and return full JSON result including any data
-// Komut veya sorguyu calistir ve veri dahil tam JSON sonucunu dondur
+// Execute command or query and return full JSON result in standard ApiResponse format
+// Komut veya sorguyu calistir ve standart ApiResponse formatinda tam JSON sonucunu dondur
 json CommandRegistry::executeWithResult(const std::string& name, const json& args) {
     // Try mutation commands first
     // Once mutasyon komutlarini dene
@@ -51,10 +57,11 @@ json CommandRegistry::executeWithResult(const std::string& name, const json& arg
         if (fn) {
             try {
                 fn(args);
-                return json({{"ok", true}});
+                return ApiResponse::ok(true);
             } catch (const std::exception& e) {
                 LOG_ERROR("[CommandRegistry] Execution error in '", name, "': ", e.what());
-                return json({{"ok", false}, {"error", e.what()}});
+                return ApiResponse::error("COMMAND_ERROR", "command.error",
+                    {{"name", name}, {"error", e.what()}});
             }
         }
     }
@@ -73,15 +80,16 @@ json CommandRegistry::executeWithResult(const std::string& name, const json& arg
         if (fn) {
             try {
                 json data = fn(args);
-                return json({{"ok", true}, {"data", data}});
+                return ApiResponse::ok(data);
             } catch (const std::exception& e) {
                 LOG_ERROR("[CommandRegistry] Query error in '", name, "': ", e.what());
-                return json({{"ok", false}, {"error", e.what()}});
+                return ApiResponse::error("QUERY_ERROR", "command.error",
+                    {{"name", name}, {"error", e.what()}});
             }
         }
     }
 
-    return json({{"ok", false}, {"error", "command not found: " + name}});
+    return ApiResponse::error("NOT_FOUND", "command.not_found", {{"name", name}});
 }
 
 // Check whether a command or query with the given name is registered

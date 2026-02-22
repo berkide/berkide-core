@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "BufferOptionsBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "BufferOptions.h"
 #include <v8.h>
 
@@ -22,24 +28,20 @@ static OptionValue JsToOptionValue(v8::Isolate* iso, v8::Local<v8::Value> val) {
     return std::string(*str ? *str : "");
 }
 
-// Helper: Convert OptionValue variant to JS value
-// Yardimci: OptionValue variant'ini JS degerine donustur
-static v8::Local<v8::Value> OptionValueToJs(v8::Isolate* iso, const OptionValue& ov) {
-    return std::visit([iso](auto&& arg) -> v8::Local<v8::Value> {
-        using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, int>) {
-            return v8::Integer::New(iso, arg);
-        } else if constexpr (std::is_same_v<T, bool>) {
-            return v8::Boolean::New(iso, arg);
-        } else if constexpr (std::is_same_v<T, double>) {
-            return v8::Number::New(iso, arg);
-        } else if constexpr (std::is_same_v<T, std::string>) {
-            return v8::String::NewFromUtf8(iso, arg.c_str()).ToLocalChecked();
-        } else {
-            return v8::Undefined(iso);
-        }
+// Helper: Convert OptionValue variant to nlohmann::json
+// Yardimci: OptionValue variant'ini nlohmann::json'a donustur
+static json OptionValueToJson(const OptionValue& ov) {
+    return std::visit([](auto&& arg) -> json {
+        return arg;
     }, ov);
 }
+
+// Context struct to pass buffer options pointer and i18n to lambda callbacks
+// Lambda callback'lere hem buffer options hem i18n isaretcisini aktarmak icin baglam yapisi
+struct OptionsCtx {
+    BufferOptions* opts;
+    I18n* i18n;
+};
 
 // Register editor.options JS object with all BufferOptions methods
 // editor.options JS nesnesini tum BufferOptions metodlariyla kaydet
@@ -47,183 +49,258 @@ void RegisterBufferOptionsBinding(v8::Isolate* isolate, v8::Local<v8::Object> ed
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsOpts = v8::Object::New(isolate);
 
-    auto* opts = edCtx.bufferOptions;
-    v8::Local<v8::External> extData = v8::External::New(isolate, opts);
+    auto* octx = new OptionsCtx{edCtx.bufferOptions, edCtx.i18n};
 
-    // options.setDefault(key, value) - Set global default option
+    // options.setDefault(key, value) -> {ok, data: true, ...} - Set global default option
     // Global varsayilan secenegi ayarla
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "setDefault"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 2) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "key, value"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             v8::String::Utf8Value key(iso, args[0]);
             OptionValue val = JsToOptionValue(iso, args[1]);
-            o->setDefault(*key ? *key : "", val);
-        }, extData).ToLocalChecked()
+            oc->opts->setDefault(*key ? *key : "", val);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.getDefault(key) -> value - Get global default option
+    // options.getDefault(key) -> {ok, data: value|null, ...} - Get global default option
     // Global varsayilan secenegi al
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getDefault"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 1) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "key"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             v8::String::Utf8Value key(iso, args[0]);
-            auto result = o->getDefault(*key ? *key : "");
+            auto result = oc->opts->getDefault(*key ? *key : "");
             if (result.has_value()) {
-                args.GetReturnValue().Set(OptionValueToJs(iso, *result));
+                V8Response::ok(args, OptionValueToJson(*result));
             } else {
-                args.GetReturnValue().Set(v8::Undefined(iso));
+                V8Response::ok(args, nullptr);
             }
-        }, extData).ToLocalChecked()
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.setLocal(bufferId, key, value) - Set buffer-local option
+    // options.setLocal(bufferId, key, value) -> {ok, data: true, ...} - Set buffer-local option
     // Buffer-yerel secenegi ayarla
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "setLocal"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 3) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 3) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId, key, value"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int bufferId = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
             v8::String::Utf8Value key(iso, args[1]);
             OptionValue val = JsToOptionValue(iso, args[2]);
-            o->setLocal(bufferId, *key ? *key : "", val);
-        }, extData).ToLocalChecked()
+            oc->opts->setLocal(bufferId, *key ? *key : "", val);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.removeLocal(bufferId, key) - Remove buffer-local override
+    // options.removeLocal(bufferId, key) -> {ok, data: true, ...} - Remove buffer-local override
     // Buffer-yerel gecersiz kilmayi kaldir
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "removeLocal"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 2) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId, key"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int bufferId = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
             v8::String::Utf8Value key(iso, args[1]);
-            o->removeLocal(bufferId, *key ? *key : "");
-        }, extData).ToLocalChecked()
+            oc->opts->removeLocal(bufferId, *key ? *key : "");
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.get(bufferId, key) -> value - Get effective option (local > default)
+    // options.get(bufferId, key) -> {ok, data: value|null, ...} - Get effective option (local > default)
     // Gecerli secenegi al (yerel > varsayilan)
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "get"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 2) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId, key"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int bufferId = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
             v8::String::Utf8Value key(iso, args[1]);
-            auto result = o->get(bufferId, *key ? *key : "");
+            auto result = oc->opts->get(bufferId, *key ? *key : "");
             if (result.has_value()) {
-                args.GetReturnValue().Set(OptionValueToJs(iso, *result));
+                V8Response::ok(args, OptionValueToJson(*result));
             } else {
-                args.GetReturnValue().Set(v8::Undefined(iso));
+                V8Response::ok(args, nullptr);
             }
-        }, extData).ToLocalChecked()
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.hasLocal(bufferId, key) -> bool - Check if buffer has local override
+    // options.hasLocal(bufferId, key) -> {ok, data: bool, ...} - Check if buffer has local override
     // Buffer'in yerel gecersiz kilmasi olup olmadigini kontrol et
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "hasLocal"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 2) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId, key"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int bufferId = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
             v8::String::Utf8Value key(iso, args[1]);
-            bool has = o->hasLocal(bufferId, *key ? *key : "");
-            args.GetReturnValue().Set(v8::Boolean::New(iso, has));
-        }, extData).ToLocalChecked()
+            bool has = oc->opts->hasLocal(bufferId, *key ? *key : "");
+            V8Response::ok(args, has);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.listKeys(bufferId) -> string[] - List all option keys for buffer
+    // options.listKeys(bufferId) -> {ok, data: [keys...], meta: {total: N}} - List all option keys for buffer
     // Bir buffer icin tum secenek anahtarlarini listele
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "listKeys"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 1) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-            int bufferId = args[0]->Int32Value(ctx).FromJust();
-            auto keys = o->listKeys(bufferId);
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(keys.size()));
-            for (size_t i = 0; i < keys.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i),
-                    v8::String::NewFromUtf8(iso, keys[i].c_str()).ToLocalChecked()).Check();
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, extData).ToLocalChecked()
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId"}}, oc->i18n);
+                return;
+            }
+            auto* iso = args.GetIsolate();
+            int bufferId = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
+            auto keys = oc->opts->listKeys(bufferId);
+
+            json arr = json::array();
+            for (const auto& k : keys) {
+                arr.push_back(k);
+            }
+            json meta = {{"total", keys.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.listLocalKeys(bufferId) -> string[] - List buffer-local override keys
+    // options.listLocalKeys(bufferId) -> {ok, data: [keys...], meta: {total: N}} - List buffer-local override keys
     // Buffer-yerel gecersiz kilma anahtarlarini listele
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "listLocalKeys"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 1) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-            int bufferId = args[0]->Int32Value(ctx).FromJust();
-            auto keys = o->listLocalKeys(bufferId);
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(keys.size()));
-            for (size_t i = 0; i < keys.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i),
-                    v8::String::NewFromUtf8(iso, keys[i].c_str()).ToLocalChecked()).Check();
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, extData).ToLocalChecked()
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId"}}, oc->i18n);
+                return;
+            }
+            auto* iso = args.GetIsolate();
+            int bufferId = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
+            auto keys = oc->opts->listLocalKeys(bufferId);
+
+            json arr = json::array();
+            for (const auto& k : keys) {
+                arr.push_back(k);
+            }
+            json meta = {{"total", keys.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.listDefaultKeys() -> string[] - List all global default keys
+    // options.listDefaultKeys() -> {ok, data: [keys...], meta: {total: N}} - List all global default keys
     // Tum global varsayilan anahtarlari listele
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "listDefaultKeys"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-            auto keys = o->listDefaultKeys();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(keys.size()));
-            for (size_t i = 0; i < keys.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i),
-                    v8::String::NewFromUtf8(iso, keys[i].c_str()).ToLocalChecked()).Check();
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, extData).ToLocalChecked()
+            auto keys = oc->opts->listDefaultKeys();
+
+            json arr = json::array();
+            for (const auto& k : keys) {
+                arr.push_back(k);
+            }
+            json meta = {{"total", keys.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.clearBuffer(bufferId) - Clear all local options for a buffer
+    // options.clearBuffer(bufferId) -> {ok, data: true, ...} - Clear all local options for a buffer
     // Bir buffer icin tum yerel secenekleri temizle
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clearBuffer"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 1) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int bufferId = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            o->clearBuffer(bufferId);
-        }, extData).ToLocalChecked()
+            oc->opts->clearBuffer(bufferId);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.getInt(bufferId, key, fallback) -> int - Get option as integer
+    // options.getInt(bufferId, key, fallback) -> {ok, data: int, ...} - Get option as integer
     // Secenegi tam sayi olarak al
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getInt"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 2) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId, key"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
             int bufferId = args[0]->Int32Value(ctx).FromJust();
@@ -232,18 +309,25 @@ void RegisterBufferOptionsBinding(v8::Isolate* isolate, v8::Local<v8::Object> ed
             if (args.Length() >= 3) {
                 fallback = args[2]->Int32Value(ctx).FromJust();
             }
-            int result = o->getInt(bufferId, *key ? *key : "", fallback);
-            args.GetReturnValue().Set(v8::Integer::New(iso, result));
-        }, extData).ToLocalChecked()
+            int result = oc->opts->getInt(bufferId, *key ? *key : "", fallback);
+            V8Response::ok(args, result);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.getBool(bufferId, key, fallback) -> bool - Get option as boolean
+    // options.getBool(bufferId, key, fallback) -> {ok, data: bool, ...} - Get option as boolean
     // Secenegi mantiksal deger olarak al
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getBool"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 2) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId, key"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
             int bufferId = args[0]->Int32Value(ctx).FromJust();
@@ -252,18 +336,25 @@ void RegisterBufferOptionsBinding(v8::Isolate* isolate, v8::Local<v8::Object> ed
             if (args.Length() >= 3) {
                 fallback = args[2]->BooleanValue(iso);
             }
-            bool result = o->getBool(bufferId, *key ? *key : "", fallback);
-            args.GetReturnValue().Set(v8::Boolean::New(iso, result));
-        }, extData).ToLocalChecked()
+            bool result = oc->opts->getBool(bufferId, *key ? *key : "", fallback);
+            V8Response::ok(args, result);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
-    // options.getString(bufferId, key, fallback) -> string - Get option as string
+    // options.getString(bufferId, key, fallback) -> {ok, data: "string", ...} - Get option as string
     // Secenegi metin olarak al
     jsOpts->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getString"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* o = static_cast<BufferOptions*>(args.Data().As<v8::External>()->Value());
-            if (!o || args.Length() < 2) return;
+            auto* oc = static_cast<OptionsCtx*>(args.Data().As<v8::External>()->Value());
+            if (!oc || !oc->opts) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, oc ? oc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "bufferId, key"}}, oc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
             int bufferId = args[0]->Int32Value(ctx).FromJust();
@@ -273,10 +364,9 @@ void RegisterBufferOptionsBinding(v8::Isolate* isolate, v8::Local<v8::Object> ed
                 v8::String::Utf8Value fb(iso, args[2]);
                 fallback = *fb ? *fb : "";
             }
-            std::string result = o->getString(bufferId, *key ? *key : "", fallback);
-            args.GetReturnValue().Set(
-                v8::String::NewFromUtf8(iso, result.c_str()).ToLocalChecked());
-        }, extData).ToLocalChecked()
+            std::string result = oc->opts->getString(bufferId, *key ? *key : "", fallback);
+            V8Response::ok(args, result);
+        }, v8::External::New(isolate, octx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

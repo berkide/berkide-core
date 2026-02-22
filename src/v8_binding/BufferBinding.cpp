@@ -1,223 +1,365 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "BufferBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "buffers.h"
 #include "file.h"
 #include <v8.h>
+
+// Context struct to pass both buffers pointer and i18n to lambda callbacks
+// Lambda callback'lere hem buffers hem i18n isaretcisini aktarmak icin baglam yapisi
+struct BufferCtx {
+    Buffers* bufs;
+    I18n* i18n;
+};
 
 // Register buffer API on editor.buffer JS object (load, save, getLine, insertChar, deleteChar, etc.)
 // editor.buffer JS nesnesine buffer API'sini kaydet (load, save, getLine, insertChar, deleteChar, vb.)
 void RegisterBufferBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& ctx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsBuffer = v8::Object::New(isolate);
-    Buffers* buffers = ctx.buffers;
 
-    // buffer.load(path)
+    auto* bctx = new BufferCtx{ctx.buffers, ctx.i18n};
+
+    // buffer.load(path) -> {ok, data: {success, message}, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "load"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "path"}}, bc->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            auto& buf = bufs->active().getBuffer();
+            auto& buf = bc->bufs->active().getBuffer();
             FileResult res = FileSystem::loadToBuffer(buf, *path);
-            v8::Local<v8::Object> result = v8::Object::New(args.GetIsolate());
-            result->Set(args.GetIsolate()->GetCurrentContext(),
-                v8::String::NewFromUtf8Literal(args.GetIsolate(), "success"),
-                v8::Boolean::New(args.GetIsolate(), res.success)).Check();
-            result->Set(args.GetIsolate()->GetCurrentContext(),
-                v8::String::NewFromUtf8Literal(args.GetIsolate(), "message"),
-                v8::String::NewFromUtf8(args.GetIsolate(), res.message.c_str()).ToLocalChecked()).Check();
-            args.GetReturnValue().Set(result);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            if (res.success) {
+                json data = {{"success", true}, {"message", res.message}};
+                V8Response::ok(args, data, nullptr, "buffer.load.success",
+                    {{"path", *path}}, bc->i18n);
+            } else {
+                V8Response::error(args, "LOAD_ERROR", "buffer.load.error",
+                    {{"path", *path}}, bc->i18n);
+            }
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.save(path)
+    // buffer.save(path) -> {ok, data: true/false, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "save"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "path"}}, bc->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            auto& buf = bufs->active().getBuffer();
+            auto& buf = bc->bufs->active().getBuffer();
             FileResult res = FileSystem::saveFromBuffer(buf, *path);
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), res.success));
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            if (res.success) {
+                V8Response::ok(args, true, nullptr, "buffer.save.success",
+                    {{"path", *path}}, bc->i18n);
+            } else {
+                V8Response::error(args, "SAVE_ERROR", "buffer.save.error",
+                    {{"path", *path}}, bc->i18n);
+            }
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.getLine(index)
+    // buffer.getLine(index) -> {ok, data: "line content", ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getLine"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "index"}}, bc->i18n);
+                return;
+            }
             int line = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            std::string s = bufs->active().getBuffer().getLine(line);
-            args.GetReturnValue().Set(v8::String::NewFromUtf8(args.GetIsolate(), s.c_str()).ToLocalChecked());
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            auto& buf = bc->bufs->active().getBuffer();
+            if (line < 0 || line >= buf.lineCount()) {
+                V8Response::error(args, "INVALID_LINE", "buffer.getline.invalid",
+                    {{"line", std::to_string(line)}}, bc->i18n);
+                return;
+            }
+            std::string s = buf.getLine(line);
+            V8Response::ok(args, s);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.insertChar(line, col, char)
+    // buffer.insertChar(line, col, char) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "insertChar"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 3) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 3) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line, col, char"}}, bc->i18n);
+                return;
+            }
             int line = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             int col  = args[1]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             v8::String::Utf8Value chStr(args.GetIsolate(), args[2]);
-            if (chStr.length() == 0) return;
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            // Use insertText for Unicode support
+            if (chStr.length() == 0) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "char"}}, bc->i18n);
+                return;
+            }
             std::string text(*chStr, chStr.length());
-            bufs->active().getBuffer().insertText(line, col, text);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().insertText(line, col, text);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.deleteChar(line, col)
+    // buffer.deleteChar(line, col) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "deleteChar"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line, col"}}, bc->i18n);
+                return;
+            }
             int line = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             int col  = args[1]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().deleteChar(line, col);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().deleteChar(line, col);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.insertLineAt(index, text)
+    // buffer.insertLineAt(index, text) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "insertLineAt"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "index, text"}}, bc->i18n);
+                return;
+            }
             int index = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             v8::String::Utf8Value text(args.GetIsolate(), args[1]);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().insertLineAt(index, *text);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().insertLineAt(index, *text);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.lineCount()
+    // buffer.lineCount() -> {ok, data: number, meta: {total: number}, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "lineCount"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            args.GetReturnValue().Set(v8::Integer::New(args.GetIsolate(), bufs->active().getBuffer().lineCount()));
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            int count = bc->bufs->active().getBuffer().lineCount();
+            json meta = {{"total", count}};
+            V8Response::ok(args, count, meta, "buffer.linecount.success",
+                {{"count", std::to_string(count)}}, bc->i18n);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.deleteLine(index)
+    // buffer.deleteLine(index) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "deleteLine"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "index"}}, bc->i18n);
+                return;
+            }
             int index = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().deleteLine(index);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().deleteLine(index);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.insertText(line, col, text): insert multi-character text at position
-    // buffer.insertText(line, col, text): konuma cok karakterli metin ekle
+    // buffer.insertText(line, col, text) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "insertText"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 3) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 3) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line, col, text"}}, bc->i18n);
+                return;
+            }
             int line = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             int col  = args[1]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             v8::String::Utf8Value text(args.GetIsolate(), args[2]);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().insertText(line, col, std::string(*text, text.length()));
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().insertText(line, col, std::string(*text, text.length()));
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.deleteRange(lineStart, colStart, lineEnd, colEnd): delete text between two positions
-    // buffer.deleteRange(lineStart, colStart, lineEnd, colEnd): iki konum arasindaki metni sil
+    // buffer.deleteRange(lineStart, colStart, lineEnd, colEnd) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "deleteRange"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 4) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 4) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "lineStart, colStart, lineEnd, colEnd"}}, bc->i18n);
+                return;
+            }
             auto ctx = args.GetIsolate()->GetCurrentContext();
             int lineStart = args[0]->Int32Value(ctx).FromMaybe(0);
             int colStart  = args[1]->Int32Value(ctx).FromMaybe(0);
             int lineEnd   = args[2]->Int32Value(ctx).FromMaybe(0);
             int colEnd    = args[3]->Int32Value(ctx).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().deleteRange(lineStart, colStart, lineEnd, colEnd);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().deleteRange(lineStart, colStart, lineEnd, colEnd);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.splitLine(line, col): split a line into two at given column
-    // buffer.splitLine(line, col): verilen sutunda bir satiri ikiye bol
+    // buffer.splitLine(line, col) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "splitLine"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line, col"}}, bc->i18n);
+                return;
+            }
             int line = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             int col  = args[1]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().splitLine(line, col);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().splitLine(line, col);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.joinLines(first, second): join two consecutive lines into one
-    // buffer.joinLines(first, second): ardisik iki satiri birlestir
+    // buffer.joinLines(first, second) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "joinLines"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "first, second"}}, bc->i18n);
+                return;
+            }
             int first  = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             int second = args[1]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().joinLines(first, second);
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().joinLines(first, second);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.columnCount(line): get number of characters in a specific line
-    // buffer.columnCount(line): belirli bir satirdaki karakter sayisini al
+    // buffer.columnCount(line) -> {ok, data: number, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "columnCount"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line"}}, bc->i18n);
+                return;
+            }
             int line = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            args.GetReturnValue().Set(v8::Integer::New(args.GetIsolate(), bufs->active().getBuffer().columnCount(line)));
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            int count = bc->bufs->active().getBuffer().columnCount(line);
+            V8Response::ok(args, count);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.clear(): clear all content, reset to single empty line
-    // buffer.clear(): tum icerigi temizle, tek bos satira sifirla
+    // buffer.clear() -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clear"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().clear();
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            bc->bufs->active().getBuffer().clear();
+            V8Response::ok(args, true, nullptr, "buffer.clear.success", {}, bc->i18n);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.isValidPos(line, col): check if position is valid within the buffer
-    // buffer.isValidPos(line, col): konumun buffer icinde gecerli olup olmadigini kontrol et
+    // buffer.isValidPos(line, col) -> {ok, data: bool, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "isValidPos"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 2) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line, col"}}, bc->i18n);
+                return;
+            }
             int line = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
             int col  = args[1]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromMaybe(0);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), bufs->active().getBuffer().isValidPos(line, col)));
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bool valid = bc->bufs->active().getBuffer().isValidPos(line, col);
+            V8Response::ok(args, valid);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
-    // buffer.insertLine(text): append a new line at the end of the buffer
-    // buffer.insertLine(text): buffer'in sonuna yeni satir ekle
+    // buffer.insertLine(text) -> {ok, data: true, ...}
     jsBuffer->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "insertLine"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
+            auto* bc = static_cast<BufferCtx*>(args.Data().As<v8::External>()->Value());
+            if (!bc || !bc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, bc ? bc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "text"}}, bc->i18n);
+                return;
+            }
             v8::String::Utf8Value text(args.GetIsolate(), args[0]);
-            auto* bufs = static_cast<Buffers*>(args.Data().As<v8::External>()->Value());
-            bufs->active().getBuffer().insertLine(std::string(*text, text.length()));
-        }, v8::External::New(isolate, buffers)).ToLocalChecked()
+            bc->bufs->active().getBuffer().insertLine(std::string(*text, text.length()));
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, bctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx, v8::String::NewFromUtf8Literal(isolate, "buffer"), jsBuffer).Check();

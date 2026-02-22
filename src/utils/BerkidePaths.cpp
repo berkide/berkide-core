@@ -1,3 +1,8 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "BerkidePaths.h"
 #include "Logger.h"
 #include <cstdlib>
@@ -73,7 +78,7 @@ void BerkidePaths::ensureStructure() {
     using namespace std::filesystem;
 
     // 1️⃣ User path yapısı oluştur
-    for (const auto& sub : {"runtime", "keymaps", "events", "plugins", "help", "autosave", "parsers"}) {
+    for (const auto& sub : {"runtime", "keymaps", "events", "plugins", "help", "autosave", "parsers", "locales"}) {
         create_directories(path(userBerkide) / sub);
     }
 }

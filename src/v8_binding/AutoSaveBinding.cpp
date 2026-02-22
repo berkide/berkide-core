@@ -1,16 +1,23 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "AutoSaveBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "AutoSave.h"
 #include "buffers.h"
 #include "state.h"
 #include <v8.h>
 
-// Context for autosave binding
-// Otomatik kaydetme binding baglami
+// Context for autosave binding with i18n support
+// i18n destekli otomatik kaydetme binding baglami
 struct AutoSaveBindCtx {
     AutoSave* autoSave;
     Buffers* bufs;
+    I18n* i18n;
 };
 
 // Register editor.autosave JS object with all public methods
@@ -19,7 +26,7 @@ void RegisterAutoSaveBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsAS = v8::Object::New(isolate);
 
-    auto* actx = new AutoSaveBindCtx{edCtx.autoSave, edCtx.buffers};
+    auto* actx = new AutoSaveBindCtx{edCtx.autoSave, edCtx.buffers, edCtx.i18n};
 
     // autosave.start() - Start auto-save background thread
     // Otomatik kaydetme arka plan thread'ini baslat
@@ -27,8 +34,12 @@ void RegisterAutoSaveBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
         v8::String::NewFromUtf8Literal(isolate, "start"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
             a->autoSave->start();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
@@ -38,8 +49,12 @@ void RegisterAutoSaveBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
         v8::String::NewFromUtf8Literal(isolate, "stop"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
             a->autoSave->stop();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
@@ -49,9 +64,17 @@ void RegisterAutoSaveBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
         v8::String::NewFromUtf8Literal(isolate, "setInterval"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave || args.Length() < 1) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "seconds"}}, a->i18n);
+                return;
+            }
             int sec = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromJust();
             a->autoSave->setInterval(sec);
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
@@ -61,100 +84,144 @@ void RegisterAutoSaveBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
         v8::String::NewFromUtf8Literal(isolate, "setDirectory"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave || args.Length() < 1) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "path"}}, a->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
             a->autoSave->setDirectory(*path ? *path : "");
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
-    // autosave.createBackup(filePath) -> bool - Create backup before first write
+    // autosave.createBackup(filePath) -> {ok, data: bool, ...} - Create backup before first write
     // Ilk yazmadan once yedek olustur
     jsAS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "createBackup"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave || args.Length() < 1) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "filePath"}}, a->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
             bool ok = a->autoSave->createBackup(*path ? *path : "");
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
+            V8Response::ok(args, ok);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
-    // autosave.saveBuffer(filePath, content) -> bool - Save buffer to recovery
+    // autosave.saveBuffer(filePath, content) -> {ok, data: bool, ...} - Save buffer to recovery
     // Buffer'i kurtarma dosyasina kaydet
     jsAS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "saveBuffer"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave || args.Length() < 2) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "filePath, content"}}, a->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             v8::String::Utf8Value path(iso, args[0]);
             v8::String::Utf8Value content(iso, args[1]);
             bool ok = a->autoSave->saveBuffer(*path ? *path : "", *content ? *content : "");
-            args.GetReturnValue().Set(v8::Boolean::New(iso, ok));
+            V8Response::ok(args, ok);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
-    // autosave.removeRecovery(filePath) - Remove recovery file
+    // autosave.removeRecovery(filePath) -> {ok, data: true, ...} - Remove recovery file
     // Kurtarma dosyasini kaldir
     jsAS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "removeRecovery"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave || args.Length() < 1) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "filePath"}}, a->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
             a->autoSave->removeRecovery(*path ? *path : "");
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
-    // autosave.listRecoveryFiles() -> [{originalPath, recoveryPath, timestamp}]
+    // autosave.listRecoveryFiles() -> {ok, data: [{originalPath, recoveryPath, timestamp}, ...], ...}
     // Kurtarma dosyalarini listele
     jsAS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "listRecoveryFiles"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
 
             auto files = a->autoSave->listRecoveryFiles();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(files.size()));
+            json arr = json::array();
             for (size_t i = 0; i < files.size(); ++i) {
-                v8::Local<v8::Object> obj = v8::Object::New(iso);
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "originalPath"),
-                    v8::String::NewFromUtf8(iso, files[i].originalPath.c_str()).ToLocalChecked()).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "recoveryPath"),
-                    v8::String::NewFromUtf8(iso, files[i].recoveryPath.c_str()).ToLocalChecked()).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "timestamp"),
-                    v8::String::NewFromUtf8(iso, files[i].timestamp.c_str()).ToLocalChecked()).Check();
-                arr->Set(ctx, static_cast<uint32_t>(i), obj).Check();
+                arr.push_back(json({
+                    {"originalPath", files[i].originalPath},
+                    {"recoveryPath", files[i].recoveryPath},
+                    {"timestamp", files[i].timestamp}
+                }));
             }
-            args.GetReturnValue().Set(arr);
+            json meta = {{"total", files.size()}};
+            V8Response::ok(args, arr, meta);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
-    // autosave.hasExternalChange(filePath) -> bool - Check if file changed externally
+    // autosave.hasExternalChange(filePath) -> {ok, data: bool, ...} - Check if file changed externally
     // Dosyanin harici olarak degistirilip degistirilmedigini kontrol et
     jsAS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "hasExternalChange"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave || args.Length() < 1) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "filePath"}}, a->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
             bool changed = a->autoSave->hasExternalChange(*path ? *path : "");
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), changed));
+            V8Response::ok(args, changed);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 
-    // autosave.recordMtime(filePath) - Record file modification time
+    // autosave.recordMtime(filePath) -> {ok, data: true, ...} - Record file modification time
     // Dosya degistirilme zamanini kaydet
     jsAS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "recordMtime"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* a = static_cast<AutoSaveBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!a || !a->autoSave || args.Length() < 1) return;
+            if (!a || !a->autoSave) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, a ? a->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "filePath"}}, a->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
             a->autoSave->recordMtime(*path ? *path : "");
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, actx)).ToLocalChecked()
     ).Check();
 

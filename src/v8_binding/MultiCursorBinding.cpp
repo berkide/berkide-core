@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "MultiCursorBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "MultiCursor.h"
 #include "buffers.h"
 #include "state.h"
@@ -18,314 +24,446 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
 struct MCBindCtx {
     MultiCursor* mc;
     Buffers* bufs;
+    I18n* i18n;
 };
 
-// Helper: convert CursorEntry to V8 object
-// Yardimci: CursorEntry'yi V8 nesnesine cevir
-static v8::Local<v8::Object> cursorToV8(v8::Isolate* iso, v8::Local<v8::Context> ctx,
-                                          const CursorEntry& c) {
-    v8::Local<v8::Object> obj = v8::Object::New(iso);
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "line"),
-        v8::Integer::New(iso, c.line)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "col"),
-        v8::Integer::New(iso, c.col)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "hasSelection"),
-        v8::Boolean::New(iso, c.hasSelection)).Check();
+// Helper: convert CursorEntry to nlohmann::json
+// Yardimci: CursorEntry'yi nlohmann::json'a cevir
+static json cursorToJson(const CursorEntry& c) {
+    json obj = {
+        {"line", c.line},
+        {"col", c.col},
+        {"hasSelection", c.hasSelection}
+    };
     if (c.hasSelection) {
-        obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "anchorLine"),
-            v8::Integer::New(iso, c.anchorLine)).Check();
-        obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "anchorCol"),
-            v8::Integer::New(iso, c.anchorCol)).Check();
+        obj["anchorLine"] = c.anchorLine;
+        obj["anchorCol"] = c.anchorCol;
     }
     return obj;
 }
 
-// Register editor.multicursor JS object
-// editor.multicursor JS nesnesini kaydet
+// Register editor.multicursor JS object with standard response format
+// Standart yanit formatiyla editor.multicursor JS nesnesini kaydet
 void RegisterMultiCursorBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& edCtx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsMC = v8::Object::New(isolate);
 
-    auto* mctx = new MCBindCtx{edCtx.multiCursor, edCtx.buffers};
+    auto* mctx = new MCBindCtx{edCtx.multiCursor, edCtx.buffers, edCtx.i18n};
 
-    // multicursor.add(line, col) -> index
+    // multicursor.add(line, col) -> {ok, data: index}
     // Konuma yeni imlec ekle
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "add"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || args.Length() < 2) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "line, col"}}, mc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
             int line = args[0]->Int32Value(ctx).FromJust();
             int col  = args[1]->Int32Value(ctx).FromJust();
             int idx = mc->mc->addCursor(line, col);
-            args.GetReturnValue().Set(v8::Integer::New(iso, idx));
+            V8Response::ok(args, idx);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.remove(index) -> bool
+    // multicursor.remove(index) -> {ok, data: bool}
     // Dizine gore imleci kaldir
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "remove"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || args.Length() < 1) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "index"}}, mc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int idx = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Boolean::New(iso, mc->mc->removeCursor(idx)));
+            bool removed = mc->mc->removeCursor(idx);
+            V8Response::ok(args, removed);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.clear() - Clear all secondary cursors
+    // multicursor.clear() -> {ok, data: true}
     // Tum ikincil imlecleri temizle
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clear"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->clearSecondary();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.list() -> [cursor, ...]
+    // multicursor.list() -> {ok, data: [cursor, ...], meta: {total: N}}
     // Tum imlecleri listele
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
 
             auto& cursors = mc->mc->cursors();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(cursors.size()));
-            for (size_t i = 0; i < cursors.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i), cursorToV8(iso, ctx, cursors[i])).Check();
+            json arr = json::array();
+            for (const auto& c : cursors) {
+                arr.push_back(cursorToJson(c));
             }
-            args.GetReturnValue().Set(arr);
+            json meta = {{"total", cursors.size()}};
+            V8Response::ok(args, arr, meta);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.count() -> number
+    // multicursor.count() -> {ok, data: number}
     // Imlec sayisini al
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "count"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
-            args.GetReturnValue().Set(v8::Integer::New(args.GetIsolate(), mc->mc->count()));
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            V8Response::ok(args, mc->mc->count());
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.isActive() -> bool
+    // multicursor.isActive() -> {ok, data: bool}
     // Coklu imlec modunun aktif olup olmadigini kontrol et
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "isActive"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) { args.GetReturnValue().Set(false); return; }
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), mc->mc->isActive()));
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            V8Response::ok(args, mc->mc->isActive());
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.insertAll(text) - Insert text at all cursors
+    // multicursor.insertAll(text) -> {ok, data: true}
     // Tum imleclere metin ekle
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "insertAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs || args.Length() < 1) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "text"}}, mc->i18n);
+                return;
+            }
             std::string text = v8Str(args.GetIsolate(), args[0]);
             mc->mc->insertAtAll(mc->bufs->active().getBuffer(), text);
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.addNextMatch(word) -> index
+    // multicursor.addNextMatch(word) -> {ok, data: index}
     // Kelimenin sonraki olusumuna imlec ekle
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "addNextMatch"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs || args.Length() < 1) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "word"}}, mc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             std::string word = v8Str(iso, args[0]);
             int idx = mc->mc->addCursorAtNextMatch(mc->bufs->active().getBuffer(), word);
-            args.GetReturnValue().Set(v8::Integer::New(iso, idx));
+            V8Response::ok(args, idx);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.addOnLines(startLine, endLine, col) - Add cursors on line range
+    // multicursor.addOnLines(startLine, endLine, col) -> {ok, data: true}
     // Satir araligina imlecler ekle
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "addOnLines"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || args.Length() < 3) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 3) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "startLine, endLine, col"}}, mc->i18n);
+                return;
+            }
             auto ctx = args.GetIsolate()->GetCurrentContext();
             int startLine = args[0]->Int32Value(ctx).FromJust();
             int endLine   = args[1]->Int32Value(ctx).FromJust();
             int col       = args[2]->Int32Value(ctx).FromJust();
             mc->mc->addCursorsOnLines(startLine, endLine, col);
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.setPrimary(line, col) - Set primary cursor position
+    // multicursor.setPrimary(line, col) -> {ok, data: true}
     // Birincil imlec konumunu ayarla
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "setPrimary"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || args.Length() < 2) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "line, col"}}, mc->i18n);
+                return;
+            }
             auto ctx = args.GetIsolate()->GetCurrentContext();
             int line = args[0]->Int32Value(ctx).FromJust();
             int col  = args[1]->Int32Value(ctx).FromJust();
             mc->mc->setPrimary(line, col);
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.primary() -> {line, col, hasSelection, ...}
+    // multicursor.primary() -> {ok, data: {line, col, hasSelection, ...}}
     // Birincil imleci al
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "primary"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-            args.GetReturnValue().Set(cursorToV8(iso, ctx, mc->mc->primary()));
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            V8Response::ok(args, cursorToJson(mc->mc->primary()));
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.moveAllUp() - Move all cursors up
+    // multicursor.moveAllUp() -> {ok, data: true}
     // Tum imlecleri yukari tasi
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "moveAllUp"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->moveAllUp(mc->bufs->active().getBuffer());
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.moveAllDown() - Move all cursors down
+    // multicursor.moveAllDown() -> {ok, data: true}
     // Tum imlecleri asagi tasi
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "moveAllDown"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->moveAllDown(mc->bufs->active().getBuffer());
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.moveAllLeft() - Move all cursors left
+    // multicursor.moveAllLeft() -> {ok, data: true}
     // Tum imlecleri sola tasi
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "moveAllLeft"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->moveAllLeft(mc->bufs->active().getBuffer());
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.moveAllRight() - Move all cursors right
+    // multicursor.moveAllRight() -> {ok, data: true}
     // Tum imlecleri saga tasi
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "moveAllRight"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->moveAllRight(mc->bufs->active().getBuffer());
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.moveAllToLineStart() - Move all cursors to line start
+    // multicursor.moveAllToLineStart() -> {ok, data: true}
     // Tum imlecleri satir basina tasi
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "moveAllToLineStart"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->moveAllToLineStart();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.moveAllToLineEnd() - Move all cursors to line end
+    // multicursor.moveAllToLineEnd() -> {ok, data: true}
     // Tum imlecleri satir sonuna tasi
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "moveAllToLineEnd"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->moveAllToLineEnd(mc->bufs->active().getBuffer());
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.backspaceAtAll() - Delete char before all cursors
+    // multicursor.backspaceAtAll() -> {ok, data: true}
     // Tum imleclerden onceki karakteri sil
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "backspaceAtAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->backspaceAtAll(mc->bufs->active().getBuffer());
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.deleteAtAll() - Delete char at all cursors
+    // multicursor.deleteAtAll() -> {ok, data: true}
     // Tum imleclerdeki karakteri sil
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "deleteAtAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc || !mc->bufs) return;
+            if (!mc || !mc->mc || !mc->bufs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->deleteAtAll(mc->bufs->active().getBuffer());
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.setAnchorAtAll() - Set selection anchor at all cursors
+    // multicursor.setAnchorAtAll() -> {ok, data: true}
     // Tum imleclerde secim baglama noktasi ayarla
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "setAnchorAtAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->setAnchorAtAll();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.clearSelectionAtAll() - Clear selection at all cursors
+    // multicursor.clearSelectionAtAll() -> {ok, data: true}
     // Tum imleclerde secimi temizle
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clearSelectionAtAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->clearSelectionAtAll();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.dedup() - Remove duplicate cursors at same position
+    // multicursor.dedup() -> {ok, data: true}
     // Ayni konumdaki tekrar eden imlecleri kaldir
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "dedup"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->dedup();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // multicursor.sort() - Sort cursors by position
+    // multicursor.sort() -> {ok, data: true}
     // Imlecleri konuma gore sirala
     jsMC->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "sort"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MCBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->mc) return;
+            if (!mc || !mc->mc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "multiCursor"}}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->mc->sort();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 

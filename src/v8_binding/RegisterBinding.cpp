@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "RegisterBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "RegisterManager.h"
 #include <v8.h>
 
@@ -11,38 +17,53 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
     return *s ? *s : "";
 }
 
+// Context struct for register binding lambdas
+// Register binding lambda'lari icin baglam yapisi
+struct RegisterCtx {
+    RegisterManager* rm;
+    I18n* i18n;
+};
+
 // Register editor.registers JS object with get, set, yank, paste, list, clear
 // editor.registers JS nesnesini get, set, yank, paste, list, clear ile kaydet
 void RegisterRegisterBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& ctx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsRegs = v8::Object::New(isolate);
-    RegisterManager* rm = ctx.registers;
 
-    // registers.get(name) -> {content, linewise} | null
+    auto* rctx = new RegisterCtx{ctx.registers, ctx.i18n};
+
+    // registers.get(name) -> {ok, data: {content, linewise} | null, ...}
     // Register icerigini al
     jsRegs->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "get"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* rm = static_cast<RegisterManager*>(args.Data().As<v8::External>()->Value());
-            if (!rm || args.Length() < 1) return;
+            auto* rc = static_cast<RegisterCtx*>(args.Data().As<v8::External>()->Value());
+            if (!rc || !rc->rm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "registerManager"}}, rc ? rc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, rc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
 
             std::string name = v8Str(iso, args[0]);
-            RegisterEntry entry = rm->get(name);
+            RegisterEntry entry = rc->rm->get(name);
 
             if (entry.content.empty()) {
-                args.GetReturnValue().SetNull();
+                V8Response::ok(args, nullptr);
                 return;
             }
 
-            v8::Local<v8::Object> obj = v8::Object::New(iso);
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "content"),
-                v8::String::NewFromUtf8(iso, entry.content.c_str()).ToLocalChecked()).Check();
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "linewise"),
-                v8::Boolean::New(iso, entry.linewise)).Check();
-            args.GetReturnValue().Set(obj);
-        }, v8::External::New(isolate, rm)).ToLocalChecked()
+            json data = {
+                {"content", entry.content},
+                {"linewise", entry.linewise}
+            };
+            V8Response::ok(args, data);
+        }, v8::External::New(isolate, rctx)).ToLocalChecked()
     ).Check();
 
     // registers.set(name, content, linewise?) - Set register content
@@ -50,16 +71,25 @@ void RegisterRegisterBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
     jsRegs->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "set"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* rm = static_cast<RegisterManager*>(args.Data().As<v8::External>()->Value());
-            if (!rm || args.Length() < 2) return;
+            auto* rc = static_cast<RegisterCtx*>(args.Data().As<v8::External>()->Value());
+            if (!rc || !rc->rm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "registerManager"}}, rc ? rc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name, content"}}, rc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
 
             std::string name = v8Str(iso, args[0]);
             std::string content = v8Str(iso, args[1]);
             bool linewise = (args.Length() > 2) ? args[2]->BooleanValue(iso) : false;
-            rm->set(name, content, linewise);
-        }, v8::External::New(isolate, rm)).ToLocalChecked()
+            rc->rm->set(name, content, linewise);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, rctx)).ToLocalChecked()
     ).Check();
 
     // registers.recordYank(content, linewise?) - Record a yank operation
@@ -67,14 +97,24 @@ void RegisterRegisterBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
     jsRegs->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "recordYank"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* rm = static_cast<RegisterManager*>(args.Data().As<v8::External>()->Value());
-            if (!rm || args.Length() < 1) return;
+            auto* rc = static_cast<RegisterCtx*>(args.Data().As<v8::External>()->Value());
+            if (!rc || !rc->rm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "registerManager"}}, rc ? rc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "content"}}, rc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
 
             std::string content = v8Str(iso, args[0]);
             bool linewise = (args.Length() > 1) ? args[1]->BooleanValue(iso) : false;
-            rm->recordYank(content, linewise);
-        }, v8::External::New(isolate, rm)).ToLocalChecked()
+            rc->rm->recordYank(content, linewise);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, rctx)).ToLocalChecked()
     ).Check();
 
     // registers.recordDelete(content, linewise?) - Record a delete operation
@@ -82,65 +122,76 @@ void RegisterRegisterBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
     jsRegs->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "recordDelete"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* rm = static_cast<RegisterManager*>(args.Data().As<v8::External>()->Value());
-            if (!rm || args.Length() < 1) return;
+            auto* rc = static_cast<RegisterCtx*>(args.Data().As<v8::External>()->Value());
+            if (!rc || !rc->rm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "registerManager"}}, rc ? rc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "content"}}, rc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
 
             std::string content = v8Str(iso, args[0]);
             bool linewise = (args.Length() > 1) ? args[1]->BooleanValue(iso) : false;
-            rm->recordDelete(content, linewise);
-        }, v8::External::New(isolate, rm)).ToLocalChecked()
+            rc->rm->recordDelete(content, linewise);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, rctx)).ToLocalChecked()
     ).Check();
 
-    // registers.getUnnamed() -> {content, linewise} | null
+    // registers.getUnnamed() -> {ok, data: {content, linewise} | null, ...}
     // Adsiz register'i al
     jsRegs->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getUnnamed"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* rm = static_cast<RegisterManager*>(args.Data().As<v8::External>()->Value());
-            if (!rm) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            RegisterEntry entry = rm->getUnnamed();
-            if (entry.content.empty()) {
-                args.GetReturnValue().SetNull();
+            auto* rc = static_cast<RegisterCtx*>(args.Data().As<v8::External>()->Value());
+            if (!rc || !rc->rm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "registerManager"}}, rc ? rc->i18n : nullptr);
                 return;
             }
 
-            v8::Local<v8::Object> obj = v8::Object::New(iso);
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "content"),
-                v8::String::NewFromUtf8(iso, entry.content.c_str()).ToLocalChecked()).Check();
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "linewise"),
-                v8::Boolean::New(iso, entry.linewise)).Check();
-            args.GetReturnValue().Set(obj);
-        }, v8::External::New(isolate, rm)).ToLocalChecked()
+            RegisterEntry entry = rc->rm->getUnnamed();
+            if (entry.content.empty()) {
+                V8Response::ok(args, nullptr);
+                return;
+            }
+
+            json data = {
+                {"content", entry.content},
+                {"linewise", entry.linewise}
+            };
+            V8Response::ok(args, data);
+        }, v8::External::New(isolate, rctx)).ToLocalChecked()
     ).Check();
 
-    // registers.list() -> [{name, content, linewise}]
+    // registers.list() -> {ok, data: [{name, content, linewise}], meta: {total: N}, ...}
     // Tum dolu register'lari listele
     jsRegs->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* rm = static_cast<RegisterManager*>(args.Data().As<v8::External>()->Value());
-            if (!rm) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            auto entries = rm->list();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(entries.size()));
-            for (size_t i = 0; i < entries.size(); ++i) {
-                v8::Local<v8::Object> obj = v8::Object::New(iso);
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "name"),
-                    v8::String::NewFromUtf8(iso, entries[i].first.c_str()).ToLocalChecked()).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "content"),
-                    v8::String::NewFromUtf8(iso, entries[i].second.content.c_str()).ToLocalChecked()).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "linewise"),
-                    v8::Boolean::New(iso, entries[i].second.linewise)).Check();
-                arr->Set(ctx, static_cast<uint32_t>(i), obj).Check();
+            auto* rc = static_cast<RegisterCtx*>(args.Data().As<v8::External>()->Value());
+            if (!rc || !rc->rm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "registerManager"}}, rc ? rc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, rm)).ToLocalChecked()
+
+            auto entries = rc->rm->list();
+            json arr = json::array();
+            for (size_t i = 0; i < entries.size(); ++i) {
+                arr.push_back({
+                    {"name", entries[i].first},
+                    {"content", entries[i].second.content},
+                    {"linewise", entries[i].second.linewise}
+                });
+            }
+            json meta = {{"total", entries.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, rctx)).ToLocalChecked()
     ).Check();
 
     // registers.clear() - Clear all registers
@@ -148,10 +199,15 @@ void RegisterRegisterBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorO
     jsRegs->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clear"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* rm = static_cast<RegisterManager*>(args.Data().As<v8::External>()->Value());
-            if (!rm) return;
-            rm->clearAll();
-        }, v8::External::New(isolate, rm)).ToLocalChecked()
+            auto* rc = static_cast<RegisterCtx*>(args.Data().As<v8::External>()->Value());
+            if (!rc || !rc->rm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "registerManager"}}, rc ? rc->i18n : nullptr);
+                return;
+            }
+            rc->rm->clearAll();
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, rctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

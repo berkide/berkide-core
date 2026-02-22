@@ -1,47 +1,56 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 // ==========================
-// 🧠 BerkIDE Runtime Core
+// BerkIDE Runtime Core
+// BerkIDE Calisma Zamani Cekirdegi
 // ==========================
 
-// Editor çekirdek API
+// Initialize editor core API
+// Editor cekirdek API'sini baslat
 globalThis.editor = globalThis.editor || {};
 editor.version = "0.1.0-dev";
 editor.state = {};
+editor.__sources.js.state = true;
 
 // --------------------------
-// 📜 Command sistemini başlat
+// Command System
+// Komut Sistemi
 // --------------------------
+
+// Command map: stores JS-level commands
+// Komut haritasi: JS seviyesindeki komutlari tutar
 editor.commands = editor.commands || {};
 editor.commands.map = new Map();
 
-// Native tarafla köprü (__nativeExec)
+// Execute a command — checks JS map first, then falls through to native (C++)
+// Komut calistir — once JS haritasini kontrol eder, yoksa native (C++) tarafina gonderir
 editor.commands.exec = function (name, args = {}) {
   if (typeof name !== "string") {
-    console.error("[Core JS] Invalid command name:", name);
+    console.error("[Core] Invalid command name:", name);
     return;
   }
 
   if (editor.commands.map.has(name)) {
-       // JS tarafında tanımlıysa doğrudan çağır
     try {
       return editor.commands.map.get(name)(args);
     } catch (e) {
-      console.error("[Core JS] JS command error:", e);
+      console.error("[Core] JS command error:", e);
     }
   } else {
-    // değilse native’e gönder
-      try {
-    const result = editor.commands.__nativeExec(name, JSON.stringify(args));
-    return JSON.parse(result || "{}");
-  } catch (e) {
-    console.error("[Core JS] Command exec failed:", e);
+    try {
+      const result = editor.commands.__nativeExec(name, JSON.stringify(args));
+      return JSON.parse(result || "{}");
+    } catch (e) {
+      console.error("[Core] Native command exec failed:", e);
+    }
   }
-  }
-
-
-
 };
 
-// Register JS-level commands
+// Register a JS-level command by name
+// JS seviyesinde isimle komut kaydet
 editor.commands.register = function (name, fn) {
   if (typeof fn !== "function") {
     console.error("[Core] register() expects function, got:", typeof fn);
@@ -51,7 +60,8 @@ editor.commands.register = function (name, fn) {
   console.log("[Core] JS command registered:", name);
 };
 
-// Execute JS-level command (or native fallback)
+// Run a command (async-safe) — JS first, native fallback
+// Komut calistir (async-guvenli) — once JS, yoksa native
 editor.commands.run = async function (name, args = {}) {
   if (editor.commands.map.has(name)) {
     try {
@@ -65,73 +75,7 @@ editor.commands.run = async function (name, args = {}) {
 };
 
 // --------------------------
-// 🎧 Event sistemi
+// Startup
+// Baslangic
 // --------------------------
-// editor.events = {
-//   _listeners: {},
-
-//   on(event, fn) {
-//     if (!this._listeners[event]) this._listeners[event] = [];
-//     this._listeners[event].push(fn);
-//   },
-
-//   emit(event, data) {
-//     const listeners = this._listeners[event] || [];
-//     for (const fn of listeners) {
-//       try {
-//         fn(data);
-//       } catch (e) {
-//         console.error(`[Core] Event '${event}' error:`, e);
-//       }
-//     }
-//   },
-// };
-
-// --------------------------
-// 🗝️ Keymap sistemi (boş)
-// --------------------------
-editor.keymap = {
-  bindings: {},
-  bind(key, command) {
-    this.bindings[key] = command;
-  },
-  trigger(key) {
-    const cmd = this.bindings[key];
-    if (cmd) editor.commands.run(cmd);
-  },
-};
-
-
-// --------------------------
-// 🔧 http server 
-// --------------------------
-
-console.log("[HTTP] server initializing...");
-const PORT = 1881
-editor.http.listen(PORT);
-
-console.log(`[HTTP] ready at http://localhost:${PORT}`);
-
-
-// --------------------------
-// 🔧 socket server 
-// --------------------------
-
-console.log("[WS] server initializing...");
-const WSPORT = 1882
-editor.ws.listen(WSPORT);
-
-console.log(`[WS] ready at ws://localhost:${WSPORT}`);
-
-
-editor.events.on("testEvent", (data) => {
-  console.log("[JS] testEvent geldi:", data);
-});
-
-
-editor.keymap.bind("Ctrl+S", "file.saveAs");
-
-// --------------------------
-// 🔧 Başlangıç mesajı
-// --------------------------
-console.log(`[BerkIDE Core] Runtime loaded. v${editor.version}`);
+console.log(`[Core] Runtime loaded. v${editor.version}`);

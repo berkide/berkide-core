@@ -4,16 +4,26 @@ REM BerkIDE Windows derleme betigi
 
 setlocal
 
-set BUILD_TYPE=%1
-if "%BUILD_TYPE%"=="" set BUILD_TYPE=Release
+set BUILD_TYPE=Release
 set BUILD_DIR=build
+set USE_TLS=OFF
+
+REM Parse arguments
+REM Argumanlari ayristir
+for %%a in (%*) do (
+    if "%%a"=="--tls" set USE_TLS=ON
+    if "%%a"=="Debug" set BUILD_TYPE=Debug
+    if "%%a"=="Release" set BUILD_TYPE=Release
+    if "%%a"=="RelWithDebInfo" set BUILD_TYPE=RelWithDebInfo
+    if "%%a"=="MinSizeRel" set BUILD_TYPE=MinSizeRel
+)
 
 REM Configure if needed (incremental build support)
 if not exist "%BUILD_DIR%\CMakeCache.txt" (
-    cmake -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=%BUILD_TYPE%
+    cmake -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DBERKIDE_USE_TLS=%USE_TLS%
 ) else (
     REM Always reconfigure to pick up changes
-    cmake -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=%BUILD_TYPE%
+    cmake -B "%BUILD_DIR%" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DBERKIDE_USE_TLS=%USE_TLS%
 )
 
 REM Build (incremental by default, use all cores)
@@ -24,14 +34,14 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-echo Build complete (%BUILD_TYPE%). Binary: %BUILD_DIR%\%BUILD_TYPE%\berkide.exe
+echo Build complete (%BUILD_TYPE%, TLS=%USE_TLS%). Binary: %BUILD_DIR%\%BUILD_TYPE%\berkide.exe
 
-REM Copy runtime if exists
+REM Sync runtime to build directory (always update, not just first time)
+REM Runtime dosyalarini build dizinine senkronize et (her zaman guncelle)
 if exist ".berkide" (
-    if not exist "%BUILD_DIR%\.berkide" (
-        xcopy /E /I /Q ".berkide" "%BUILD_DIR%\.berkide"
-        echo Copied .berkide runtime to build directory.
-    )
+    if exist "%BUILD_DIR%\.berkide" rmdir /S /Q "%BUILD_DIR%\.berkide"
+    xcopy /E /I /Q ".berkide" "%BUILD_DIR%\.berkide"
+    echo Synced .berkide runtime to build directory.
 )
 
 endlocal

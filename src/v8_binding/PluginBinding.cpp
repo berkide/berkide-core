@@ -1,72 +1,101 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "PluginBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "PluginManager.h"
 #include <v8.h>
+
+// Context struct for plugin binding lambdas
+// Eklenti binding lambda'lari icin baglam yapisi
+struct PluginCtx {
+    PluginManager* pm;
+    I18n* i18n;
+};
 
 // Register editor.plugins JS object with list(), enable(name), disable(name)
 // editor.plugins JS nesnesini list(), enable(name), disable(name) ile kaydet
 void RegisterPluginBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& ctx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsPlugins = v8::Object::New(isolate);
-    PluginManager* pm = ctx.pluginManager;
 
-    // plugins.list() -> [{name, version, enabled, loaded, error}]
+    auto* pctx = new PluginCtx{ctx.pluginManager, ctx.i18n};
+
+    // plugins.list() -> {ok, data: [{name, version, enabled, loaded, error?}], meta: {total: N}, ...}
     jsPlugins->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* pm = static_cast<PluginManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
-            auto* isolate = args.GetIsolate();
-            auto ctx = isolate->GetCurrentContext();
-            auto& list = pm->list();
+            auto* pc = static_cast<PluginCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "pluginManager"}}, pc ? pc->i18n : nullptr);
+                return;
+            }
 
-            v8::Local<v8::Array> arr = v8::Array::New(isolate, static_cast<int>(list.size()));
+            auto& list = pc->pm->list();
+            json arr = json::array();
             for (size_t i = 0; i < list.size(); ++i) {
                 auto& ps = list[i];
-                v8::Local<v8::Object> obj = v8::Object::New(isolate);
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "name"),
-                    v8::String::NewFromUtf8(isolate, ps.manifest.name.c_str()).ToLocalChecked()).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "version"),
-                    v8::String::NewFromUtf8(isolate, ps.manifest.version.c_str()).ToLocalChecked()).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "enabled"),
-                    v8::Boolean::New(isolate, ps.manifest.enabled)).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "loaded"),
-                    v8::Boolean::New(isolate, ps.loaded)).Check();
+                json obj = {
+                    {"name", ps.manifest.name},
+                    {"version", ps.manifest.version},
+                    {"enabled", ps.manifest.enabled},
+                    {"loaded", ps.loaded}
+                };
                 if (ps.hasError) {
-                    obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "error"),
-                        v8::String::NewFromUtf8(isolate, ps.error.c_str()).ToLocalChecked()).Check();
+                    obj["error"] = ps.error;
                 }
-                arr->Set(ctx, static_cast<uint32_t>(i), obj).Check();
+                arr.push_back(obj);
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            json meta = {{"total", list.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // plugins.enable(name)
+    // plugins.enable(name) -> {ok, data: bool, ...}
     jsPlugins->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "enable"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* pm = static_cast<PluginManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<PluginCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "pluginManager"}}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, pc->i18n);
+                return;
+            }
             v8::String::Utf8Value name(args.GetIsolate(), args[0]);
-            bool ok = pm->enable(*name ? *name : "");
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool result = pc->pm->enable(*name ? *name : "");
+            V8Response::ok(args, result);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // plugins.disable(name)
+    // plugins.disable(name) -> {ok, data: bool, ...}
     jsPlugins->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "disable"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* pm = static_cast<PluginManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm) return;
+            auto* pc = static_cast<PluginCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "pluginManager"}}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, pc->i18n);
+                return;
+            }
             v8::String::Utf8Value name(args.GetIsolate(), args[0]);
-            bool ok = pm->disable(*name ? *name : "");
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool result = pc->pm->disable(*name ? *name : "");
+            V8Response::ok(args, result);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
     // plugins.discover(dir) - Discover plugins from a directory
@@ -74,76 +103,107 @@ void RegisterPluginBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj
     jsPlugins->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "discover"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* pm = static_cast<PluginManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm || args.Length() < 1) return;
+            auto* pc = static_cast<PluginCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "pluginManager"}}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "dir"}}, pc->i18n);
+                return;
+            }
             v8::String::Utf8Value dir(args.GetIsolate(), args[0]);
-            pm->discover(*dir ? *dir : "");
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            pc->pm->discover(*dir ? *dir : "");
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // plugins.activate(name) -> bool - Activate a plugin by name
+    // plugins.activate(name) -> {ok, data: bool, ...} - Activate a plugin by name
     // Ismiyle bir eklentiyi etkinlestir
     jsPlugins->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "activate"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* pm = static_cast<PluginManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm || args.Length() < 1) return;
+            auto* pc = static_cast<PluginCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "pluginManager"}}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, pc->i18n);
+                return;
+            }
             v8::String::Utf8Value name(args.GetIsolate(), args[0]);
-            bool ok = pm->activate(*name ? *name : "");
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool result = pc->pm->activate(*name ? *name : "");
+            V8Response::ok(args, result);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // plugins.deactivate(name) -> bool - Deactivate a plugin by name
+    // plugins.deactivate(name) -> {ok, data: bool, ...} - Deactivate a plugin by name
     // Ismiyle bir eklentiyi devre disi birak
     jsPlugins->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "deactivate"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* pm = static_cast<PluginManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm || args.Length() < 1) return;
+            auto* pc = static_cast<PluginCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "pluginManager"}}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, pc->i18n);
+                return;
+            }
             v8::String::Utf8Value name(args.GetIsolate(), args[0]);
-            bool ok = pm->deactivate(*name ? *name : "");
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), ok));
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            bool result = pc->pm->deactivate(*name ? *name : "");
+            V8Response::ok(args, result);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
-    // plugins.find(name) -> {name, version, enabled, loaded, error} | null
+    // plugins.find(name) -> {ok, data: {name, version, enabled, loaded, dirPath?, error?} | null, ...}
     // Ismiyle eklenti bul
     jsPlugins->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "find"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* pm = static_cast<PluginManager*>(args.Data().As<v8::External>()->Value());
-            if (!pm || args.Length() < 1) return;
+            auto* pc = static_cast<PluginCtx*>(args.Data().As<v8::External>()->Value());
+            if (!pc || !pc->pm) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "pluginManager"}}, pc ? pc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, pc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
 
             v8::String::Utf8Value name(iso, args[0]);
             std::string nameStr = *name ? *name : "";
-            PluginState* ps = pm->find(nameStr);
+            PluginState* ps = pc->pm->find(nameStr);
             if (!ps) {
-                args.GetReturnValue().SetNull();
+                V8Response::ok(args, nullptr);
                 return;
             }
 
-            v8::Local<v8::Object> obj = v8::Object::New(iso);
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "name"),
-                v8::String::NewFromUtf8(iso, ps->manifest.name.c_str()).ToLocalChecked()).Check();
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "version"),
-                v8::String::NewFromUtf8(iso, ps->manifest.version.c_str()).ToLocalChecked()).Check();
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "enabled"),
-                v8::Boolean::New(iso, ps->manifest.enabled)).Check();
-            obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "loaded"),
-                v8::Boolean::New(iso, ps->loaded)).Check();
+            json data = {
+                {"name", ps->manifest.name},
+                {"version", ps->manifest.version},
+                {"enabled", ps->manifest.enabled},
+                {"loaded", ps->loaded}
+            };
             if (!ps->dirPath.empty()) {
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "dirPath"),
-                    v8::String::NewFromUtf8(iso, ps->dirPath.c_str()).ToLocalChecked()).Check();
+                data["dirPath"] = ps->dirPath;
             }
             if (ps->hasError) {
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "error"),
-                    v8::String::NewFromUtf8(iso, ps->error.c_str()).ToLocalChecked()).Check();
+                data["error"] = ps->error;
             }
-            args.GetReturnValue().Set(obj);
-        }, v8::External::New(isolate, pm)).ToLocalChecked()
+            V8Response::ok(args, data);
+        }, v8::External::New(isolate, pctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

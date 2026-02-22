@@ -2,12 +2,11 @@
 
 # BerkIDE
 
-### The Editor Engine That Gets Out of Your Way
+### No impositions.
 
-**C++ core. V8 JavaScript middleware. Any UI. Any language. Zero lock-in.**
+No UI imposed. No language imposed. No workflow imposed. No rules imposed.
 
-*28 core subsystems. 333 JS methods via 34 bindings. 220 commands (117 mutations + 103 queries). One headless server.*
-*Emacs philosophy, modern execution.*
+**C++ core. V8 JavaScript runtime. Headless server. You decide the rest.**
 
 </div>
 
@@ -657,6 +656,56 @@ GET    /api/help/:topic              # Get help topic content
 GET    /api/help/search?q=query      # Search help
 GET    /api/plugins                  # List plugins
 GET    /api/session                  # Current session info
+```
+
+### Standard API Response Format
+
+All HTTP endpoints and JS bindings return responses in a unified format:
+
+```json
+// Success response
+// Basarili yanit
+{
+  "ok": true,
+  "data": { ... },          // Actual payload (any type)
+  "meta": { "count": 42 },  // Optional metadata
+  "message": "File loaded: /tmp/test.js"
+}
+
+// Error response
+// Hata yaniti
+{
+  "ok": false,
+  "error": "NOT_FOUND",
+  "message": "Buffer not found: scratch"
+}
+```
+
+| Field     | Type    | Description                                    |
+|-----------|---------|------------------------------------------------|
+| `ok`      | boolean | `true` = success, `false` = error              |
+| `data`    | any     | Response payload (object, array, string, etc.) |
+| `meta`    | object  | Optional metadata (counts, pagination, etc.)   |
+| `error`   | string  | Error code (only on failure)                   |
+| `message` | string  | Human-readable message (localized via i18n)    |
+
+**i18n:** Start the server with `--locale=tr` for Turkish messages. Default is `en`.
+
+```bash
+./berkide --locale=tr
+```
+
+**JS binding example:**
+
+```javascript
+const resp = editor.buffer.getLine(5);
+if (resp.ok) {
+    console.log(resp.data);      // line content
+    console.log(resp.message);   // "Line 5 retrieved" (or Turkish equivalent)
+} else {
+    console.error(resp.error);   // error code
+    console.error(resp.message); // human-readable error
+}
 ```
 
 ### WebSocket Protocol

@@ -1,10 +1,80 @@
 {
-  "Ctrl+S": "buffer.save",
-  "Ctrl+O": "buffer.open",
-  "Ctrl+N": "buffer.new",
-  "Ctrl+W": "buffer.close",
-  "Ctrl+Z": "buffer.undo",
-  "Ctrl+Y": "buffer.redo",
-  "Ctrl+P": "file.info",
-  "Ctrl+Shift+S": "buffer.saveAs"
+  "_comment": "BerkIDE Default Keymap / Varsayilan Tus Haritasi",
+
+  "Ctrl+S":           "file.save",
+  "Ctrl+Shift+S":     "file.saveAs",
+  "Ctrl+O":           "file.open",
+  "Ctrl+N":           "buffer.new",
+  "Ctrl+Shift+N":     "file.saveAll",
+
+  "Ctrl+Z":           "edit.undo",
+  "Ctrl+Y":           "edit.redo",
+  "Ctrl+Shift+Z":     "edit.redo",
+  "Ctrl+X":           "edit.cut",
+  "Ctrl+C":           "edit.yank",
+  "Ctrl+V":           "edit.paste",
+  "Ctrl+Shift+K":     "edit.deleteLine",
+
+  "Ctrl+A":           "selection.selectAll",
+
+  "Ctrl+W":           "tab.close",
+  "Ctrl+Tab":         "tab.next",
+  "Ctrl+Shift+Tab":   "tab.prev",
+  "Ctrl+1":           "tab.switchTo",
+  "Ctrl+2":           "tab.switchTo",
+  "Ctrl+3":           "tab.switchTo",
+  "Ctrl+4":           "tab.switchTo",
+  "Ctrl+5":           "tab.switchTo",
+  "Ctrl+6":           "tab.switchTo",
+  "Ctrl+7":           "tab.switchTo",
+  "Ctrl+8":           "tab.switchTo",
+  "Ctrl+9":           "tab.switchTo",
+
+  "Up":               "cursor.up",
+  "Down":             "cursor.down",
+  "Left":             "cursor.left",
+  "Right":            "cursor.right",
+  "Home":             "cursor.home",
+  "End":              "cursor.end",
+
+  "Ctrl+F":           "search.forward",
+  "Ctrl+Shift+F":     "search.backward",
+  "F3":               "search.next",
+  "Shift+F3":         "search.prev",
+  "Ctrl+H":           "search.replace",
+  "Ctrl+Shift+H":     "search.replaceAll",
+
+  "Ctrl+Shift+[":     "fold.collapse",
+  "Ctrl+Shift+]":     "fold.expand",
+  "Ctrl+K Ctrl+J":    "fold.expandAll",
+  "Ctrl+K Ctrl+0":    "fold.collapseAll",
+  "Ctrl+Shift+T":     "fold.toggle",
+
+  "Ctrl+\\":          "window.splitV",
+  "Ctrl+Shift+\\":    "window.splitH",
+  "Ctrl+Shift+W":     "window.close",
+  "Ctrl+K Ctrl+Right": "window.focusNext",
+  "Ctrl+K Ctrl+Left":  "window.focusPrev",
+  "Ctrl+K Ctrl+Up":    "window.focusUp",
+  "Ctrl+K Ctrl+Down":  "window.focusDown",
+  "Ctrl+K Ctrl+=":     "window.equalize",
+
+  "Ctrl+Alt+Up":      "multicursor.addAbove",
+  "Ctrl+Alt+Down":    "multicursor.addBelow",
+  "Ctrl+D":           "multicursor.addNextMatch",
+  "Escape":           "multicursor.clear",
+
+  "Tab":              "indent.increase",
+  "Shift+Tab":        "indent.decrease",
+
+  "Ctrl+Shift+R":     "macro.record",
+  "Ctrl+Shift+P":     "macro.play",
+  "Ctrl+Shift+E":     "macro.stop",
+
+  "Ctrl+M":           "mark.set",
+  "Ctrl+Shift+M":     "mark.jump",
+  "Alt+Left":         "mark.jumpBack",
+  "Alt+Right":        "mark.jumpForward",
+
+  "Ctrl+Q":           "app.quit"
 }

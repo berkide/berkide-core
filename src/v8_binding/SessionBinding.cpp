@@ -1,14 +1,38 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "SessionBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "SessionManager.h"
 #include "buffers.h"
+
+// Helper: convert SessionDocument to json
+// Yardimci: SessionDocument'i json'a cevir
+static json sessionDocToJson(const SessionDocument& doc, bool includeScrollTop = true, bool includeIsActive = false) {
+    json obj = {
+        {"filePath", doc.filePath},
+        {"cursorLine", doc.cursorLine},
+        {"cursorCol", doc.cursorCol}
+    };
+    if (includeScrollTop) {
+        obj["scrollTop"] = doc.scrollTop;
+    }
+    if (includeIsActive) {
+        obj["isActive"] = doc.isActive;
+    }
+    return obj;
+}
 
 // Context struct for session binding closures
 // Oturum binding kapanislari icin baglam yapisi
 struct SessionBindCtx {
     SessionManager* session;
     Buffers* buffers;
+    I18n* i18n;
 };
 
 // Register editor.session JS API
@@ -17,143 +41,165 @@ void RegisterSessionBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsSession = v8::Object::New(isolate);
 
-    auto* sc = new SessionBindCtx{ctx.sessionManager, ctx.buffers};
+    auto* sc = new SessionBindCtx{ctx.sessionManager, ctx.buffers, ctx.i18n};
     auto ext = v8::External::New(isolate, sc);
 
-    // editor.session.save() -> bool
+    // editor.session.save() -> {ok, data: bool, ...}
     // Mevcut oturumu kaydet
     jsSession->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "save"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!c->session || !c->buffers) { args.GetReturnValue().Set(false); return; }
-            bool ok = c->session->save(*c->buffers);
-            args.GetReturnValue().Set(ok);
+            if (!c || !c->session || !c->buffers) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
+                return;
+            }
+            bool result = c->session->save(*c->buffers);
+            V8Response::ok(args, result);
         }, ext).ToLocalChecked()
     ).Check();
 
-    // editor.session.load() -> {documents: [...], activeIndex, workingDir} | null
+    // editor.session.load() -> {ok, data: {documents, activeIndex, workingDir} | null, ...}
     // Oturumu yukle
     jsSession->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "load"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
-            auto iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            if (!c->session) { args.GetReturnValue().SetNull(); return; }
-
-            SessionState state;
-            if (!c->session->load(state)) {
-                args.GetReturnValue().SetNull();
+            if (!c || !c->session) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
                 return;
             }
 
-            v8::Local<v8::Object> result = v8::Object::New(iso);
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "activeIndex"),
-                        v8::Integer::New(iso, state.activeIndex)).Check();
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "workingDir"),
-                        v8::String::NewFromUtf8(iso, state.lastWorkingDir.c_str()).ToLocalChecked()).Check();
-
-            v8::Local<v8::Array> docs = v8::Array::New(iso, static_cast<int>(state.documents.size()));
-            for (size_t i = 0; i < state.documents.size(); ++i) {
-                v8::Local<v8::Object> doc = v8::Object::New(iso);
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "filePath"),
-                         v8::String::NewFromUtf8(iso, state.documents[i].filePath.c_str()).ToLocalChecked()).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "cursorLine"),
-                         v8::Integer::New(iso, state.documents[i].cursorLine)).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "cursorCol"),
-                         v8::Integer::New(iso, state.documents[i].cursorCol)).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "scrollTop"),
-                         v8::Integer::New(iso, state.documents[i].scrollTop)).Check();
-                docs->Set(ctx, static_cast<uint32_t>(i), doc).Check();
+            SessionState state;
+            if (!c->session->load(state)) {
+                V8Response::ok(args, nullptr);
+                return;
             }
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "documents"), docs).Check();
 
-            args.GetReturnValue().Set(result);
+            json docs = json::array();
+            for (size_t i = 0; i < state.documents.size(); ++i) {
+                docs.push_back(sessionDocToJson(state.documents[i]));
+            }
+
+            json data = {
+                {"activeIndex", state.activeIndex},
+                {"workingDir", state.lastWorkingDir},
+                {"documents", docs}
+            };
+            V8Response::ok(args, data);
         }, ext).ToLocalChecked()
     ).Check();
 
-    // editor.session.saveAs(name) -> bool
+    // editor.session.saveAs(name) -> {ok, data: bool, ...}
     // Oturumu adla kaydet
     jsSession->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "saveAs"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (args.Length() < 1 || !args[0]->IsString()) { args.GetReturnValue().Set(false); return; }
+            if (!c || !c->session || !c->buffers) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1 || !args[0]->IsString()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, c->i18n);
+                return;
+            }
             v8::String::Utf8Value name(args.GetIsolate(), args[0]);
-            bool ok = c->session->saveAs(*name, *c->buffers);
-            args.GetReturnValue().Set(ok);
+            bool result = c->session->saveAs(*name, *c->buffers);
+            V8Response::ok(args, result);
         }, ext).ToLocalChecked()
     ).Check();
 
-    // editor.session.loadFrom(name) -> object | null
+    // editor.session.loadFrom(name) -> {ok, data: {documents, activeIndex} | null, ...}
     // Adlandirilmis oturumu yukle
     jsSession->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "loadFrom"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
+            if (!c || !c->session) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1 || !args[0]->IsString()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, c->i18n);
+                return;
+            }
             auto iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            if (args.Length() < 1 || !args[0]->IsString()) { args.GetReturnValue().SetNull(); return; }
             v8::String::Utf8Value name(iso, args[0]);
 
             SessionState state;
             if (!c->session->loadFrom(*name, state)) {
-                args.GetReturnValue().SetNull();
+                V8Response::ok(args, nullptr);
                 return;
             }
 
-            v8::Local<v8::Object> result = v8::Object::New(iso);
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "activeIndex"),
-                        v8::Integer::New(iso, state.activeIndex)).Check();
-
-            v8::Local<v8::Array> docs = v8::Array::New(iso, static_cast<int>(state.documents.size()));
+            json docs = json::array();
             for (size_t i = 0; i < state.documents.size(); ++i) {
-                v8::Local<v8::Object> doc = v8::Object::New(iso);
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "filePath"),
-                         v8::String::NewFromUtf8(iso, state.documents[i].filePath.c_str()).ToLocalChecked()).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "cursorLine"),
-                         v8::Integer::New(iso, state.documents[i].cursorLine)).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "cursorCol"),
-                         v8::Integer::New(iso, state.documents[i].cursorCol)).Check();
-                docs->Set(ctx, static_cast<uint32_t>(i), doc).Check();
+                // loadFrom does not include scrollTop in the original
+                // loadFrom orijinalinde scrollTop dahil degil
+                json doc = {
+                    {"filePath", state.documents[i].filePath},
+                    {"cursorLine", state.documents[i].cursorLine},
+                    {"cursorCol", state.documents[i].cursorCol}
+                };
+                docs.push_back(doc);
             }
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "documents"), docs).Check();
-            args.GetReturnValue().Set(result);
+
+            json data = {
+                {"activeIndex", state.activeIndex},
+                {"documents", docs}
+            };
+            V8Response::ok(args, data);
         }, ext).ToLocalChecked()
     ).Check();
 
-    // editor.session.list() -> [string]
+    // editor.session.list() -> {ok, data: [string, ...], meta: {total: N}, ...}
     // Kaydedilmis oturumlari listele
     jsSession->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
-            auto iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
+            if (!c || !c->session) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
+                return;
+            }
 
             auto names = c->session->listSessions();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(names.size()));
+            json arr = json::array();
             for (size_t i = 0; i < names.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i),
-                         v8::String::NewFromUtf8(iso, names[i].c_str()).ToLocalChecked()).Check();
+                arr.push_back(names[i]);
             }
-            args.GetReturnValue().Set(arr);
+            json meta = {{"total", names.size()}};
+            V8Response::ok(args, arr, meta);
         }, ext).ToLocalChecked()
     ).Check();
 
-    // editor.session.remove(name) -> bool
+    // editor.session.remove(name) -> {ok, data: bool, ...}
     // Adlandirilmis oturumu sil
     jsSession->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "remove"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (args.Length() < 1 || !args[0]->IsString()) { args.GetReturnValue().Set(false); return; }
+            if (!c || !c->session) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1 || !args[0]->IsString()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, c->i18n);
+                return;
+            }
             v8::String::Utf8Value name(args.GetIsolate(), args[0]);
-            bool ok = c->session->deleteSession(*name);
-            args.GetReturnValue().Set(ok);
+            bool result = c->session->deleteSession(*name);
+            V8Response::ok(args, result);
         }, ext).ToLocalChecked()
     ).Check();
 
@@ -163,53 +209,49 @@ void RegisterSessionBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
         v8::String::NewFromUtf8Literal(isolate, "setSessionPath"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!c->session || args.Length() < 1 || !args[0]->IsString()) return;
+            if (!c || !c->session) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1 || !args[0]->IsString()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "path"}}, c->i18n);
+                return;
+            }
             v8::String::Utf8Value path(args.GetIsolate(), args[0]);
             c->session->setSessionPath(*path);
+            V8Response::ok(args, true);
         }, ext).ToLocalChecked()
     ).Check();
 
-    // editor.session.lastState() -> {documents, activeIndex, workingDir, windowWidth, windowHeight}
+    // editor.session.lastState() -> {ok, data: {documents, activeIndex, workingDir, windowWidth, windowHeight}, ...}
     // Son kaydedilen oturum durumunu al
     jsSession->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "lastState"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* c = static_cast<SessionBindCtx*>(args.Data().As<v8::External>()->Value());
-            auto iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            if (!c->session) { args.GetReturnValue().SetNull(); return; }
+            if (!c || !c->session) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "sessionManager"}}, c ? c->i18n : nullptr);
+                return;
+            }
 
             const SessionState& state = c->session->lastState();
 
-            v8::Local<v8::Object> result = v8::Object::New(iso);
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "activeIndex"),
-                        v8::Integer::New(iso, state.activeIndex)).Check();
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "workingDir"),
-                        v8::String::NewFromUtf8(iso, state.lastWorkingDir.c_str()).ToLocalChecked()).Check();
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "windowWidth"),
-                        v8::Integer::New(iso, state.windowWidth)).Check();
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "windowHeight"),
-                        v8::Integer::New(iso, state.windowHeight)).Check();
-
-            v8::Local<v8::Array> docs = v8::Array::New(iso, static_cast<int>(state.documents.size()));
+            json docs = json::array();
             for (size_t i = 0; i < state.documents.size(); ++i) {
-                v8::Local<v8::Object> doc = v8::Object::New(iso);
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "filePath"),
-                         v8::String::NewFromUtf8(iso, state.documents[i].filePath.c_str()).ToLocalChecked()).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "cursorLine"),
-                         v8::Integer::New(iso, state.documents[i].cursorLine)).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "cursorCol"),
-                         v8::Integer::New(iso, state.documents[i].cursorCol)).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "scrollTop"),
-                         v8::Integer::New(iso, state.documents[i].scrollTop)).Check();
-                doc->Set(ctx, v8::String::NewFromUtf8Literal(iso, "isActive"),
-                         v8::Boolean::New(iso, state.documents[i].isActive)).Check();
-                docs->Set(ctx, static_cast<uint32_t>(i), doc).Check();
+                docs.push_back(sessionDocToJson(state.documents[i], true, true));
             }
-            result->Set(ctx, v8::String::NewFromUtf8Literal(iso, "documents"), docs).Check();
 
-            args.GetReturnValue().Set(result);
+            json data = {
+                {"activeIndex", state.activeIndex},
+                {"workingDir", state.lastWorkingDir},
+                {"windowWidth", state.windowWidth},
+                {"windowHeight", state.windowHeight},
+                {"documents", docs}
+            };
+            V8Response::ok(args, data);
         }, ext).ToLocalChecked()
     ).Check();
 

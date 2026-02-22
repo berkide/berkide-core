@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "MacroBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "MacroRecorder.h"
 #include "commands.h"
 #include <v8.h>
@@ -12,11 +18,12 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
     return *s ? *s : "";
 }
 
-// Context for macro binding: holds MacroRecorder + CommandRouter for playback
-// Makro binding baglami: oynatma icin MacroRecorder + CommandRouter tutar
+// Context for macro binding: holds MacroRecorder + CommandRouter + I18n for playback
+// Makro binding baglami: oynatma icin MacroRecorder + CommandRouter + I18n tutar
 struct MacroBindCtx {
     MacroRecorder* recorder;
     CommandRouter* router;
+    I18n* i18n;
 };
 
 // Register editor.macro JS object
@@ -25,38 +32,57 @@ void RegisterMacroBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj,
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsMacro = v8::Object::New(isolate);
 
-    auto* mctx = new MacroBindCtx{edCtx.macroRecorder, edCtx.commandRouter};
+    auto* mctx = new MacroBindCtx{edCtx.macroRecorder, edCtx.commandRouter, edCtx.i18n};
 
-    // macro.record(register) - Start recording into a register
+    // macro.record(register) -> {ok, data: true, ...} - Start recording into a register
     // Bir register'a kaydetmeye basla
     jsMacro->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "record"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MacroBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->recorder || args.Length() < 1) return;
+            if (!mc || !mc->recorder) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "register"}}, mc->i18n);
+                return;
+            }
             std::string reg = v8Str(args.GetIsolate(), args[0]);
             mc->recorder->startRecording(reg);
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // macro.stop() - Stop recording
+    // macro.stop() -> {ok, data: true, ...} - Stop recording
     // Kaydi durdur
     jsMacro->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "stop"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MacroBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->recorder) return;
+            if (!mc || !mc->recorder) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, mc ? mc->i18n : nullptr);
+                return;
+            }
             mc->recorder->stopRecording();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // macro.play(register, count?) - Play a macro
+    // macro.play(register, count?) -> {ok, data: true, ...} - Play a macro
     // Bir makroyu oynat
     jsMacro->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "play"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MacroBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->recorder || !mc->router || args.Length() < 1) return;
+            if (!mc || !mc->recorder || !mc->router) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "register"}}, mc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
@@ -65,7 +91,11 @@ void RegisterMacroBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj,
             if (count < 1) count = 1;
 
             const auto* macro = mc->recorder->getMacro(reg);
-            if (!macro) return;
+            if (!macro) {
+                V8Response::error(args, "MACRO_NOT_FOUND", "macro.not_found",
+                    {{"register", reg}}, mc->i18n);
+                return;
+            }
 
             // Play the macro `count` times
             // Makroyu `count` kez oynat
@@ -76,67 +106,78 @@ void RegisterMacroBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj,
                     mc->router->execute(cmd.name, cmdArgs);
                 }
             }
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // macro.isRecording() -> bool
+    // macro.isRecording() -> {ok, data: bool, ...}
     // Kayit yapilip yapilmadigini kontrol et
     jsMacro->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "isRecording"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MacroBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->recorder) { args.GetReturnValue().Set(false); return; }
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), mc->recorder->isRecording()));
+            if (!mc || !mc->recorder) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            bool recording = mc->recorder->isRecording();
+            V8Response::ok(args, recording);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // macro.recordingRegister() -> string
+    // macro.recordingRegister() -> {ok, data: "registerName", ...}
     // Kayit yapilan register'in adini dondur
     jsMacro->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "recordingRegister"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MacroBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->recorder) return;
-            auto* iso = args.GetIsolate();
-            const std::string& reg = mc->recorder->recordingRegister();
-            args.GetReturnValue().Set(
-                v8::String::NewFromUtf8(iso, reg.c_str()).ToLocalChecked());
+            if (!mc || !mc->recorder) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, mc ? mc->i18n : nullptr);
+                return;
+            }
+            std::string reg = mc->recorder->recordingRegister();
+            V8Response::ok(args, reg);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // macro.list() -> [string, ...]  - List all register names with macros
+    // macro.list() -> {ok, data: ["a", "b", ...], meta: {total: N}, ...} - List all register names with macros
     // Makro kayitli tum register adlarini listele
     jsMacro->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MacroBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->recorder) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
+            if (!mc || !mc->recorder) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, mc ? mc->i18n : nullptr);
+                return;
+            }
 
             auto regs = mc->recorder->listRegisters();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(regs.size()));
+            json arr = json::array();
             for (size_t i = 0; i < regs.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i),
-                    v8::String::NewFromUtf8(iso, regs[i].c_str()).ToLocalChecked()).Check();
+                arr.push_back(regs[i]);
             }
-            args.GetReturnValue().Set(arr);
+            json meta = {{"total", regs.size()}};
+            V8Response::ok(args, arr, meta);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 
-    // macro.clear(register?) - Clear a register or all macros
+    // macro.clear(register?) -> {ok, data: true, ...} - Clear a register or all macros
     // Bir register'i veya tum makrolari temizle
     jsMacro->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clear"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* mc = static_cast<MacroBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!mc || !mc->recorder) return;
+            if (!mc || !mc->recorder) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, mc ? mc->i18n : nullptr);
+                return;
+            }
             if (args.Length() > 0) {
                 std::string reg = v8Str(args.GetIsolate(), args[0]);
                 mc->recorder->clearRegister(reg);
             } else {
                 mc->recorder->clearAll();
             }
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, mctx)).ToLocalChecked()
     ).Check();
 

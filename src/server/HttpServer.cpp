@@ -1,5 +1,11 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "HttpServer.h"
 #include "StateSnapshot.h"
+#include "ApiResponse.h"
 #include "buffers.h"
 #include "HelpSystem.h"
 #include "Logger.h"
@@ -24,8 +30,12 @@ bool HttpServer::checkAuth(const httplib::Request& req, httplib::Response& res) 
     std::string expected = "Bearer " + config_.bearerToken;
     if (authHeader == expected) return true;
 
+    // Return standardized error response for unauthorized requests
+    // Yetkisiz istekler icin standart hata yaniti dondur
     res.status = 401;
-    res.set_content("{\"error\":\"unauthorized\"}", "application/json");
+    I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+    res.set_content(ApiResponse::error("UNAUTHORIZED", "http.unauthorized", {}, i18n).dump(),
+        "application/json");
     return false;
 }
 
@@ -33,6 +43,12 @@ bool HttpServer::checkAuth(const httplib::Request& req, httplib::Response& res) 
 // Tum HTTP API rotalarini merkezi endpoint kayit defteri uzerinden kaydet
 void HttpServer::setupRoutes() {
     auto* srv = activeServer();
+
+    // Request logging middleware — logs every incoming request with method, path and status
+    // Istek loglama ara katmani — gelen her istegi method, yol ve durum koduyla loglar
+    srv->set_logger([](const httplib::Request& req, const httplib::Response& res) {
+        LOG_INFO("[HTTP] ", req.method, " ", req.path, " → ", res.status);
+    });
 
     // Configure auth checker for the registry
     // Kayit defteri icin kimlik dogrulama kontrolcusunu yapilandir
@@ -42,6 +58,8 @@ void HttpServer::setupRoutes() {
 
     // --- Discovery & Health ---
 
+    // Health check — plain text, not wrapped in standard response
+    // Saglik kontrolu — duz metin, standart yanita sarilmaz
     registry_.get(srv, "/ping", "Health check ping", false,
         [](const httplib::Request&, httplib::Response& res) {
             res.set_content("pong", "text/plain");
@@ -49,14 +67,19 @@ void HttpServer::setupRoutes() {
 
     registry_.get(srv, "/api/endpoints", "List all API endpoints with metadata", false,
         [this](const httplib::Request&, httplib::Response& res) {
-            res.set_content(registry_.toJson().dump(2), "application/json");
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            json data = registry_.toJson();
+            json meta = {{"total", registry_.count()}};
+            res.set_content(ApiResponse::ok(data, meta, "http.endpoints.success",
+                {{"count", std::to_string(registry_.count())}}, i18n).dump(2), "application/json");
         });
 
     registry_.get(srv, "/api/server", "Server status and configuration", false,
         [this](const httplib::Request&, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             json info = {
                 {"name", "BerkIDE"},
-                {"version", BERKIDE_VERSION},
+                {"version", "0.1.0"},
                 {"status", running_ ? "running" : "stopped"},
                 {"http", {{"bind", config_.bindAddress}, {"port", config_.httpPort}}},
                 {"ws", {{"port", config_.wsPort}}},
@@ -64,54 +87,104 @@ void HttpServer::setupRoutes() {
                 {"auth", config_.requireAuth},
                 {"endpoints", registry_.count()}
             };
-            res.set_content(info.dump(2), "application/json");
+            res.set_content(ApiResponse::ok(info, nullptr, "http.server.info", {}, i18n).dump(2),
+                "application/json");
         });
 
     // --- Editor State API ---
 
     registry_.get(srv, "/api/state", "Full editor state (cursor, buffer, mode, open buffers)", true,
         [this](const httplib::Request&, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->buffers) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->buffers) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "editor context unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             json state = StateSnapshot::fullState(*edCtx_->buffers);
-            res.set_content(state.dump(), "application/json");
+            res.set_content(ApiResponse::ok(state, nullptr, "http.state.success", {}, i18n).dump(),
+                "application/json");
         });
 
     registry_.get(srv, "/api/buffer", "Active buffer content as array of lines", true,
         [this](const httplib::Request&, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->buffers) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->buffers) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "editor context unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             json buf = StateSnapshot::activeBuffer(*edCtx_->buffers);
-            res.set_content(buf.dump(), "application/json");
+            res.set_content(ApiResponse::ok(buf, nullptr, "http.buffer.content", {}, i18n).dump(),
+                "application/json");
         });
 
     registry_.get(srv, R"(/api/buffer/line/(\d+))", "Get a single line by number", true,
         [this](const httplib::Request& req, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->buffers) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->buffers) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "editor context unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             int n = std::stoi(req.matches[1]);
-            json line = StateSnapshot::bufferLine(*edCtx_->buffers, n);
-            res.set_content(line.dump(), "application/json");
+            auto& buffer = edCtx_->buffers->active().getBuffer();
+            if (n < 0 || n >= buffer.lineCount()) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("LINE_OUT_OF_RANGE", "http.buffer.line.invalid",
+                    {{"line", std::to_string(n)}}, i18n).dump(), "application/json");
+                return;
+            }
+            json data = {{"line", n}, {"content", buffer.getLine(n)}};
+            res.set_content(ApiResponse::ok(data, nullptr, "http.buffer.line",
+                {{"line", std::to_string(n)}}, i18n).dump(), "application/json");
         },
         json({{"n", "integer — line number (0-based)"}}));
 
     registry_.get(srv, "/api/cursor", "Current cursor position {line, col}", true,
         [this](const httplib::Request&, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->buffers) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->buffers) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "editor context unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             json cur = StateSnapshot::cursorPosition(*edCtx_->buffers);
-            res.set_content(cur.dump(), "application/json");
+            res.set_content(ApiResponse::ok(cur, nullptr, "http.cursor.success", {}, i18n).dump(),
+                "application/json");
         });
 
     registry_.get(srv, "/api/buffers", "List all open buffers with titles and active flag", true,
         [this](const httplib::Request&, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->buffers) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->buffers) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "editor context unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             json list = StateSnapshot::bufferList(*edCtx_->buffers);
-            res.set_content(list.dump(), "application/json");
+            json meta = {{"total", list.size()}};
+            res.set_content(ApiResponse::ok(list, meta, "http.buffers.list",
+                {{"count", std::to_string(list.size())}}, i18n).dump(), "application/json");
         });
 
     // --- Input API ---
 
     registry_.post(srv, "/api/input/key", "Simulate key press via command dispatch", true,
         [this](const httplib::Request& req, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             auto body = json::parse(req.body, nullptr, false);
-            if (!body.is_object()) { res.status = 400; return; }
+            if (!body.is_object()) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("BAD_REQUEST", "http.parse_error", {}, i18n).dump(),
+                    "application/json");
+                return;
+            }
             json result = V8Engine::instance().dispatchCommand("input.key", body);
             res.set_content(result.dump(), "application/json");
         },
@@ -119,8 +192,14 @@ void HttpServer::setupRoutes() {
 
     registry_.post(srv, "/api/input/char", "Insert character into active buffer", true,
         [this](const httplib::Request& req, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             auto body = json::parse(req.body, nullptr, false);
-            if (!body.is_object() || body.value("text", "").empty()) { res.status = 400; return; }
+            if (!body.is_object() || body.value("text", "").empty()) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("BAD_REQUEST", "http.bad_request",
+                    {{"detail", "missing 'text' field"}}, i18n).dump(), "application/json");
+                return;
+            }
             json result = V8Engine::instance().dispatchCommand("input.char", body);
             res.set_content(result.dump(), "application/json");
         },
@@ -130,8 +209,14 @@ void HttpServer::setupRoutes() {
 
     registry_.post(srv, "/api/buffer/edit", "Buffer edit operations (insert, delete, insertLine, deleteLine)", true,
         [this](const httplib::Request& req, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             auto body = json::parse(req.body, nullptr, false);
-            if (!body.is_object()) { res.status = 400; return; }
+            if (!body.is_object()) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("BAD_REQUEST", "http.parse_error", {}, i18n).dump(),
+                    "application/json");
+                return;
+            }
 
             std::string action = body.value("action", "");
 
@@ -144,7 +229,8 @@ void HttpServer::setupRoutes() {
             else if (action == "deleteLine") cmd = "edit.deleteLine";
             else {
                 res.status = 400;
-                res.set_content(json({{"ok", false}, {"error", "unknown action"}}).dump(), "application/json");
+                res.set_content(ApiResponse::error("UNKNOWN_ACTION", "http.unknown_action",
+                    {{"action", action}}, i18n).dump(), "application/json");
                 return;
             }
 
@@ -158,8 +244,14 @@ void HttpServer::setupRoutes() {
 
     registry_.post(srv, "/api/buffer/open", "Open a file into a new buffer", true,
         [this](const httplib::Request& req, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             auto body = json::parse(req.body, nullptr, false);
-            if (!body.is_object() || body.value("path", "").empty()) { res.status = 400; return; }
+            if (!body.is_object() || body.value("path", "").empty()) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("BAD_REQUEST", "http.bad_request",
+                    {{"detail", "missing 'path' field"}}, i18n).dump(), "application/json");
+                return;
+            }
             json result = V8Engine::instance().dispatchCommand("file.open", body);
             res.set_content(result.dump(), "application/json");
         },
@@ -179,8 +271,14 @@ void HttpServer::setupRoutes() {
 
     registry_.post(srv, "/api/buffers/switch", "Switch to a buffer by index", true,
         [this](const httplib::Request& req, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             auto body = json::parse(req.body, nullptr, false);
-            if (!body.is_object() || body.value("index", -1) < 0) { res.status = 400; return; }
+            if (!body.is_object() || body.value("index", -1) < 0) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("BAD_REQUEST", "http.bad_request",
+                    {{"detail", "missing or invalid 'index' field"}}, i18n).dump(), "application/json");
+                return;
+            }
             json result = V8Engine::instance().dispatchCommand("tab.switchTo", body);
             res.set_content(result.dump(), "application/json");
         },
@@ -190,7 +288,14 @@ void HttpServer::setupRoutes() {
 
     registry_.post(srv, "/command", "Legacy command dispatch", true,
         [this](const httplib::Request& req, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             auto jsonBody = json::parse(req.body, nullptr, false);
+            if (!jsonBody.is_object()) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("BAD_REQUEST", "http.parse_error", {}, i18n).dump(),
+                    "application/json");
+                return;
+            }
             std::string cmd = jsonBody.value("cmd", "");
             auto args = jsonBody.value("args", json::object());
             json result = V8Engine::instance().dispatchCommand(cmd, args);
@@ -200,7 +305,14 @@ void HttpServer::setupRoutes() {
 
     registry_.post(srv, "/api/command", "Unified command and query dispatch (returns result data)", true,
         [this](const httplib::Request& req, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             auto jsonBody = json::parse(req.body, nullptr, false);
+            if (!jsonBody.is_object()) {
+                res.status = 400;
+                res.set_content(ApiResponse::error("BAD_REQUEST", "http.parse_error", {}, i18n).dump(),
+                    "application/json");
+                return;
+            }
             std::string cmd = jsonBody.value("cmd", "");
             auto args = jsonBody.value("args", json::object());
             json result = V8Engine::instance().dispatchCommand(cmd, args);
@@ -210,44 +322,72 @@ void HttpServer::setupRoutes() {
 
     registry_.get(srv, "/api/commands", "List all registered commands and queries", true,
         [this](const httplib::Request&, httplib::Response& res) {
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
             json list = V8Engine::instance().listCommands();
-            res.set_content(list.dump(), "application/json");
+            int total = list.value("total", 0);
+            json meta = {{"total", total}};
+            res.set_content(ApiResponse::ok(list, meta, "http.commands.list",
+                {{"count", std::to_string(total)}}, i18n).dump(), "application/json");
         });
 
     // --- Help System API ---
 
     registry_.get(srv, "/api/help", "List all help topics", true,
         [this](const httplib::Request&, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->helpSystem) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->helpSystem) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "help system unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             auto topics = edCtx_->helpSystem->listTopics();
             json arr = json::array();
             for (auto* t : topics) {
                 arr.push_back({{"id", t->id}, {"title", t->title}, {"tags", t->tags}});
             }
-            res.set_content(arr.dump(), "application/json");
+            json meta = {{"total", arr.size()}};
+            res.set_content(ApiResponse::ok(arr, meta, "http.help.list",
+                {{"count", std::to_string(arr.size())}}, i18n).dump(), "application/json");
         });
 
     registry_.get(srv, "/api/help/search", "Search help topics by keyword", true,
         [this](const httplib::Request& req, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->helpSystem) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->helpSystem) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "help system unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             std::string query = req.get_param_value("q");
             auto results = edCtx_->helpSystem->search(query);
             json arr = json::array();
             for (auto* t : results) {
                 arr.push_back({{"id", t->id}, {"title", t->title}, {"tags", t->tags}});
             }
-            res.set_content(arr.dump(), "application/json");
+            json meta = {{"total", arr.size()}};
+            res.set_content(ApiResponse::ok(arr, meta, "http.help.search",
+                {{"count", std::to_string(arr.size())}, {"query", query}}, i18n).dump(),
+                "application/json");
         },
         json({{"q", "string — search query"}}));
 
     registry_.get(srv, R"(/api/help/([a-zA-Z0-9_-]+))", "Get a specific help topic with full content", true,
         [this](const httplib::Request& req, httplib::Response& res) {
-            if (!edCtx_ || !edCtx_->helpSystem) { res.status = 500; return; }
+            I18n* i18n = edCtx_ ? edCtx_->i18n : nullptr;
+            if (!edCtx_ || !edCtx_->helpSystem) {
+                res.status = 500;
+                res.set_content(ApiResponse::error("INTERNAL_ERROR", "http.internal_error",
+                    {{"detail", "help system unavailable"}}, i18n).dump(), "application/json");
+                return;
+            }
             std::string topicId = req.matches[1];
             auto* topic = edCtx_->helpSystem->getTopic(topicId);
             if (!topic) {
                 res.status = 404;
-                res.set_content(json({{"error", "topic not found"}}).dump(), "application/json");
+                res.set_content(ApiResponse::error("NOT_FOUND", "http.help.not_found",
+                    {{"id", topicId}}, i18n).dump(), "application/json");
                 return;
             }
             json j = {
@@ -256,7 +396,8 @@ void HttpServer::setupRoutes() {
                 {"content", topic->content},
                 {"tags", topic->tags}
             };
-            res.set_content(j.dump(), "application/json");
+            res.set_content(ApiResponse::ok(j, nullptr, "http.help.topic",
+                {{"id", topicId}}, i18n).dump(), "application/json");
         },
         json({{"topic", "string — help topic ID"}}));
 

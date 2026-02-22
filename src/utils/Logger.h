@@ -1,11 +1,18 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #pragma once
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <mutex>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
 #include <cstdlib>
+#include <filesystem>
 
 // Log severity levels from lowest (Debug) to highest (Error)
 // En dusukten (Debug) en yuksege (Error) log ciddiyet seviyeleri
@@ -45,6 +52,24 @@ public:
     // Renkli ciktiyi etkinlestir veya devre disi birak (varsayilan: otomatik)
     void setColor(bool enabled) { color_ = enabled; }
 
+    // Enable file logging to the given directory path.
+    // Verilen dizin yoluna dosya loglamayi etkinlestir.
+    // Creates the directory if needed, opens a timestamped log file.
+    // Gerekirse dizini olusturur, zaman damgali log dosyasi acar.
+    bool enableFileLog(const std::string& dirPath) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensureDir(dirPath);
+
+        std::string filename = (std::filesystem::path(dirPath) / ("berkide-" + dateStamp() + ".log")).string();
+        fileStream_.open(filename, std::ios::app);
+        if (!fileStream_.is_open()) {
+            std::cerr << "Logger: cannot open log file: " << filename << "\n";
+            return false;
+        }
+        fileEnabled_ = true;
+        return true;
+    }
+
     // Log at Debug level
     // Debug seviyesinde logla
     template<typename... Args>
@@ -75,7 +100,34 @@ private:
 
     LogLevel level_ = LogLevel::Info;
     bool color_ = true;
+    bool fileEnabled_ = false;
+    std::ofstream fileStream_;
     std::mutex mutex_;
+
+    // Create directory (recursive, like mkdir -p)
+    // Dizin olustur (rekursif, mkdir -p gibi)
+    static void ensureDir(const std::string& path) {
+        std::filesystem::create_directories(path);
+    }
+
+    // Get current date as YYYY-MM-DD for log filename
+    // Log dosya adi icin mevcut tarihi YYYY-MM-DD olarak al
+    static std::string dateStamp() {
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+#ifdef _WIN32
+        localtime_s(&tm, &time);
+#else
+        localtime_r(&time, &tm);
+#endif
+        std::ostringstream oss;
+        oss << std::setfill('0')
+            << (1900 + tm.tm_year) << "-"
+            << std::setw(2) << (1 + tm.tm_mon) << "-"
+            << std::setw(2) << tm.tm_mday;
+        return oss.str();
+    }
 
     // ANSI escape codes
     // ANSI kacis kodlari
@@ -239,6 +291,13 @@ private:
                 << "\n";
         } else {
             out << timestamp() << "  " << levelText(level) << "  " << msg << "\n";
+        }
+
+        // Write plain text to log file if enabled
+        // Dosya loglama aktifse renksiz duz metin yaz
+        if (fileEnabled_ && fileStream_.is_open()) {
+            fileStream_ << timestamp() << "  " << levelText(level) << "  " << msg << "\n";
+            fileStream_.flush();
         }
     }
 };

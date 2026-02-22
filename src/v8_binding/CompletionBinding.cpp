@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "CompletionBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "CompletionEngine.h"
 #include <v8.h>
 
@@ -11,51 +17,55 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
     return *s ? *s : "";
 }
 
-// Helper: convert CompletionItem to V8 object
-// Yardimci: CompletionItem'i V8 nesnesine cevir
-static v8::Local<v8::Object> itemToV8(v8::Isolate* iso, v8::Local<v8::Context> ctx,
-                                        const CompletionItem& item) {
-    v8::Local<v8::Object> obj = v8::Object::New(iso);
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "text"),
-        v8::String::NewFromUtf8(iso, item.text.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "label"),
-        v8::String::NewFromUtf8(iso, item.label.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "detail"),
-        v8::String::NewFromUtf8(iso, item.detail.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "kind"),
-        v8::String::NewFromUtf8(iso, item.kind.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "insertText"),
-        v8::String::NewFromUtf8(iso, item.insertText.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "score"),
-        v8::Number::New(iso, item.score)).Check();
+// Context for completion binding
+// Tamamlama binding baglami
+struct CompletionCtx {
+    CompletionEngine* engine;
+    I18n* i18n;
+};
 
-    // Match positions array
-    // Esleme konumlari dizisi
-    v8::Local<v8::Array> posArr = v8::Array::New(iso, static_cast<int>(item.matchPositions.size()));
-    for (size_t i = 0; i < item.matchPositions.size(); ++i) {
-        posArr->Set(ctx, static_cast<uint32_t>(i),
-            v8::Integer::New(iso, item.matchPositions[i])).Check();
+// Helper: convert CompletionItem to nlohmann::json
+// Yardimci: CompletionItem'i nlohmann::json'a cevir
+static json itemToJson(const CompletionItem& item) {
+    json posArr = json::array();
+    for (auto pos : item.matchPositions) {
+        posArr.push_back(pos);
     }
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "matchPositions"), posArr).Check();
-
-    return obj;
+    return json({
+        {"text", item.text},
+        {"label", item.label},
+        {"detail", item.detail},
+        {"kind", item.kind},
+        {"insertText", item.insertText},
+        {"score", item.score},
+        {"matchPositions", posArr}
+    });
 }
 
-// Register editor.completion JS object
-// editor.completion JS nesnesini kaydet
+// Register editor.completion JS object with standard response format
+// Standart yanit formatiyla editor.completion JS nesnesini kaydet
 void RegisterCompletionBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& edCtx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsComp = v8::Object::New(isolate);
 
-    auto* eng = edCtx.completionEngine;
+    auto* cctx = new CompletionCtx{edCtx.completionEngine, edCtx.i18n};
 
-    // completion.filter(candidates, query) -> [item, ...]
+    // completion.filter(candidates, query) -> {ok, data: [item, ...], meta: {total: N}}
     // Adaylari filtrele ve puanla
     jsComp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "filter"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* ce = static_cast<CompletionEngine*>(args.Data().As<v8::External>()->Value());
-            if (!ce || args.Length() < 2 || !args[0]->IsArray()) return;
+            auto* cc = static_cast<CompletionCtx*>(args.Data().As<v8::External>()->Value());
+            if (!cc || !cc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "completionEngine"}}, cc ? cc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2 || !args[0]->IsArray()) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "candidates, query"}}, cc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
@@ -100,74 +110,106 @@ void RegisterCompletionBinding(v8::Isolate* isolate, v8::Local<v8::Object> edito
             }
 
             std::string query = v8Str(iso, args[1]);
-            auto results = ce->filter(candidates, query);
+            auto results = cc->engine->filter(candidates, query);
 
-            v8::Local<v8::Array> resultArr = v8::Array::New(iso, static_cast<int>(results.size()));
-            for (size_t i = 0; i < results.size(); ++i) {
-                resultArr->Set(ctx, static_cast<uint32_t>(i), itemToV8(iso, ctx, results[i])).Check();
+            json arr = json::array();
+            for (const auto& r : results) {
+                arr.push_back(itemToJson(r));
             }
-            args.GetReturnValue().Set(resultArr);
-        }, v8::External::New(isolate, eng)).ToLocalChecked()
+            json meta = {{"total", results.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, cctx)).ToLocalChecked()
     ).Check();
 
-    // completion.score(text, query) -> number
+    // completion.score(text, query) -> {ok, data: number}
     // Tek bir metni sorguya karsi puanla
     jsComp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "score"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* ce = static_cast<CompletionEngine*>(args.Data().As<v8::External>()->Value());
-            if (!ce || args.Length() < 2) return;
+            auto* cc = static_cast<CompletionCtx*>(args.Data().As<v8::External>()->Value());
+            if (!cc || !cc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "completionEngine"}}, cc ? cc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "text, query"}}, cc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
 
             std::string text  = v8Str(iso, args[0]);
             std::string query = v8Str(iso, args[1]);
-            double s = ce->score(text, query);
-            args.GetReturnValue().Set(v8::Number::New(iso, s));
-        }, v8::External::New(isolate, eng)).ToLocalChecked()
+            double s = cc->engine->score(text, query);
+            V8Response::ok(args, s);
+        }, v8::External::New(isolate, cctx)).ToLocalChecked()
     ).Check();
 
-    // completion.extractWords(text) -> [string, ...]
+    // completion.extractWords(text) -> {ok, data: [string, ...], meta: {total: N}}
     // Metinden kelimeleri cikar
     jsComp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "extractWords"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
+            auto* cc = static_cast<CompletionCtx*>(args.Data().As<v8::External>()->Value());
+            if (!cc) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "text"}}, cc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
 
             std::string text = v8Str(iso, args[0]);
             auto words = CompletionEngine::extractWords(text);
 
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(words.size()));
-            for (size_t i = 0; i < words.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i),
-                    v8::String::NewFromUtf8(iso, words[i].c_str()).ToLocalChecked()).Check();
+            json arr = json::array();
+            for (const auto& w : words) {
+                arr.push_back(w);
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, eng)).ToLocalChecked()
+            json meta = {{"total", words.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, cctx)).ToLocalChecked()
     ).Check();
 
-    // completion.setMaxResults(n)
+    // completion.setMaxResults(n) -> {ok, data: true}
     // Maksimum sonuc sayisini ayarla
     jsComp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "setMaxResults"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* ce = static_cast<CompletionEngine*>(args.Data().As<v8::External>()->Value());
-            if (!ce || args.Length() < 1) return;
+            auto* cc = static_cast<CompletionCtx*>(args.Data().As<v8::External>()->Value());
+            if (!cc || !cc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "completionEngine"}}, cc ? cc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "n"}}, cc->i18n);
+                return;
+            }
             int n = args[0]->Int32Value(args.GetIsolate()->GetCurrentContext()).FromJust();
-            ce->setMaxResults(n);
-        }, v8::External::New(isolate, eng)).ToLocalChecked()
+            cc->engine->setMaxResults(n);
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, cctx)).ToLocalChecked()
     ).Check();
 
-    // completion.maxResults() -> int - Get maximum number of results
+    // completion.maxResults() -> {ok, data: int}
     // Maksimum sonuc sayisini al
     jsComp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "maxResults"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* ce = static_cast<CompletionEngine*>(args.Data().As<v8::External>()->Value());
-            if (!ce) return;
-            args.GetReturnValue().Set(ce->maxResults());
-        }, v8::External::New(isolate, eng)).ToLocalChecked()
+            auto* cc = static_cast<CompletionCtx*>(args.Data().As<v8::External>()->Value());
+            if (!cc || !cc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "completionEngine"}}, cc ? cc->i18n : nullptr);
+                return;
+            }
+            V8Response::ok(args, cc->engine->maxResults());
+        }, v8::External::New(isolate, cctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

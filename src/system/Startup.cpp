@@ -1,14 +1,30 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "Startup.h"
 #include "../utils/BerkidePaths.h"
 #include "PluginManager.h"
 #include "HelpSystem.h"
 #include "EditorContext.h"
+#include "FileWatcher.h"
 #include "Logger.h"
 #include <thread>
 #include <chrono>
 #include <filesystem>
+#include <vector>
+#include <memory>
 
 namespace fs = std::filesystem;
+
+// Global restart flag (extern declared in Startup.h)
+// Global yeniden baslatma bayragi (Startup.h'de extern tanimli)
+std::atomic<bool> g_restartRequested{false};
+
+// File watchers owned by Startup (not V8Engine)
+// Startup'a ait dosya izleyicileri (V8Engine degil)
+static std::vector<std::unique_ptr<FileWatcher>> s_watchers;
 
 // Initialize the V8 JavaScript engine, throw on failure
 // V8 JavaScript motorunu baslat, basarisiz olursa hata firlat
@@ -76,12 +92,45 @@ void LoadBerkideEnvironment(V8Engine& eng) {
     }
 }
 
-
-// Start file watcher on user plugins directory for hot-reload
-// Canli yeniden yukleme icin kullanici eklenti dizininde dosya izleyiciyi baslat
-void StartPluginWatcher(V8Engine& eng) {
+// Start file watchers on both app and user .berkide directories
+// Hem app hem user .berkide dizinlerinde dosya izleyicileri baslat
+// On any file change, sets g_restartRequested so main loop can restart the process
+// Herhangi bir dosya degisikliginde g_restartRequested set eder, boylece ana dongu process'i yeniden baslatabilir
+void StartWatchers() {
     auto& paths = berkide::BerkidePaths::instance();
-    eng.startPluginWatcher(paths.userBerkide + "/plugins");
+
+    auto addWatcher = [](const std::string& dir) {
+        if (!fs::exists(dir)) {
+            LOG_WARN("[Watcher] Directory does not exist, skipping: ", dir);
+            return;
+        }
+
+        auto watcher = std::make_unique<FileWatcher>();
+
+        watcher->onEvent([](const FileEventData& event) {
+            const char* action = event.type == FileEvent::Created  ? "Created"  :
+                                 event.type == FileEvent::Modified ? "Modified" :
+                                                                     "Deleted";
+            LOG_INFO("[Watcher] ", action, ": ", event.path);
+            g_restartRequested.store(true);
+        });
+
+        watcher->watch(dir);
+        s_watchers.push_back(std::move(watcher));
+    };
+
+    addWatcher(paths.appBerkide);
+    addWatcher(paths.userBerkide);
+}
+
+// Stop all file watchers
+// Tum dosya izleyicilerini durdur
+void StopWatchers() {
+    for (auto& w : s_watchers) {
+        w->stop();
+    }
+    s_watchers.clear();
+    LOG_INFO("[Watcher] All watchers stopped");
 }
 
 // Main editor loop placeholder (runs for 60 seconds as a stub)
@@ -90,17 +139,14 @@ void StartEditorLoop(V8Engine& eng) {
     LOG_INFO("[Startup] Entering editor loop...");
     using namespace std::chrono_literals;
 
-    // örnek: 60 saniye boyunca çalışıyor
     for (int i = 0; i < 60; ++i) {
         std::this_thread::sleep_for(1s);
-        // ileride buraya input handling, command dispatch, vs. gelecek
     }
 }
 
-// Gracefully shut down the V8 engine, stop plugin watcher and release resources
-// V8 motorunu duzgun kapat, eklenti izleyiciyi durdur ve kaynaklari serbest birak
+// Gracefully shut down the V8 engine
+// V8 motorunu duzgun kapat
 void ShutdownEngine(V8Engine& eng) {
-    eng.stopPluginWatcher();
     eng.shutdown();
     LOG_INFO("[Startup] Engine shutdown complete.");
 }

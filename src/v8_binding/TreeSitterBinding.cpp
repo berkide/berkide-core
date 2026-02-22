@@ -1,8 +1,14 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #ifdef BERKIDE_TREESITTER_ENABLED
 
 #include "TreeSitterBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "TreeSitterEngine.h"
 #include "buffers.h"
 #include "state.h"
@@ -20,129 +26,161 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
 struct TSBindCtx {
     TreeSitterEngine* engine;
     Buffers* bufs;
+    I18n* i18n;
 };
 
-// Helper: convert SyntaxNode to V8 object (shallow - no children for perf)
-// Yardimci: SyntaxNode'u V8 nesnesine cevir (sig - performans icin cocuksuz)
-static v8::Local<v8::Object> nodeToV8(v8::Isolate* iso, v8::Local<v8::Context> ctx,
-                                        const SyntaxNode& node) {
-    v8::Local<v8::Object> obj = v8::Object::New(iso);
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "type"),
-        v8::String::NewFromUtf8(iso, node.type.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "startLine"),
-        v8::Integer::New(iso, node.startLine)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "startCol"),
-        v8::Integer::New(iso, node.startCol)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "endLine"),
-        v8::Integer::New(iso, node.endLine)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "endCol"),
-        v8::Integer::New(iso, node.endCol)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "isNamed"),
-        v8::Boolean::New(iso, node.isNamed)).Check();
+// Helper: convert SyntaxNode to nlohmann::json (recursive)
+// Yardimci: SyntaxNode'u nlohmann::json'a cevir (rekursif)
+static json nodeToJson(const SyntaxNode& node) {
+    json obj = {
+        {"type", node.type},
+        {"startLine", node.startLine},
+        {"startCol", node.startCol},
+        {"endLine", node.endLine},
+        {"endCol", node.endCol},
+        {"isNamed", node.isNamed}
+    };
     if (!node.fieldName.empty()) {
-        obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "fieldName"),
-            v8::String::NewFromUtf8(iso, node.fieldName.c_str()).ToLocalChecked()).Check();
+        obj["fieldName"] = node.fieldName;
     }
 
     // Add children array
     // Cocuklar dizisi ekle
-    v8::Local<v8::Array> children = v8::Array::New(iso, static_cast<int>(node.children.size()));
-    for (size_t i = 0; i < node.children.size(); ++i) {
-        children->Set(ctx, static_cast<uint32_t>(i), nodeToV8(iso, ctx, node.children[i])).Check();
+    json children = json::array();
+    for (const auto& child : node.children) {
+        children.push_back(nodeToJson(child));
     }
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "children"), children).Check();
+    obj["children"] = children;
 
     return obj;
 }
 
-// Register editor.treesitter JS object
-// editor.treesitter JS nesnesini kaydet
+// Register editor.treesitter JS object with standard response format
+// Standart yanit formatiyla editor.treesitter JS nesnesini kaydet
 void RegisterTreeSitterBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& edCtx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsTS = v8::Object::New(isolate);
 
-    auto* tctx = new TSBindCtx{edCtx.treeSitter, edCtx.buffers};
+    auto* tctx = new TSBindCtx{edCtx.treeSitter, edCtx.buffers, edCtx.i18n};
 
-    // treesitter.loadLanguage(name, libraryPath) -> bool
+    // treesitter.loadLanguage(name, libraryPath) -> {ok, data: bool}
     // Paylasimli kutuphaneden dil grameri yukle
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "loadLanguage"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine || args.Length() < 2) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name, libraryPath"}}, tc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             std::string name = v8Str(iso, args[0]);
             std::string path = v8Str(iso, args[1]);
-            args.GetReturnValue().Set(v8::Boolean::New(iso, tc->engine->loadLanguage(name, path)));
+            bool result = tc->engine->loadLanguage(name, path);
+            V8Response::ok(args, result);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.setLanguage(name) -> bool
+    // treesitter.setLanguage(name) -> {ok, data: bool}
     // Ayristirici icin dili ayarla
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "setLanguage"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine || args.Length() < 1) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, tc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             std::string name = v8Str(iso, args[0]);
-            args.GetReturnValue().Set(v8::Boolean::New(iso, tc->engine->setLanguage(name)));
+            bool result = tc->engine->setLanguage(name);
+            V8Response::ok(args, result);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.currentLanguage() -> string
+    // treesitter.currentLanguage() -> {ok, data: string}
     // Mevcut dil adini al
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "currentLanguage"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine) return;
-            auto* iso = args.GetIsolate();
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
             const std::string& lang = tc->engine->currentLanguage();
-            args.GetReturnValue().Set(
-                v8::String::NewFromUtf8(iso, lang.c_str()).ToLocalChecked());
+            V8Response::ok(args, lang);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.hasLanguage(name) -> bool
+    // treesitter.hasLanguage(name) -> {ok, data: bool}
     // Dilin yuklu olup olmadigini kontrol et
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "hasLanguage"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine || args.Length() < 1) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "name"}}, tc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             std::string name = v8Str(iso, args[0]);
-            args.GetReturnValue().Set(v8::Boolean::New(iso, tc->engine->hasLanguage(name)));
+            bool result = tc->engine->hasLanguage(name);
+            V8Response::ok(args, result);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.listLanguages() -> [string, ...]
+    // treesitter.listLanguages() -> {ok, data: [string, ...], meta: {total: N}}
     // Yuklu dilleri listele
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "listLanguages"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-            auto langs = tc->engine->listLanguages();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(langs.size()));
-            for (size_t i = 0; i < langs.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i),
-                    v8::String::NewFromUtf8(iso, langs[i].c_str()).ToLocalChecked()).Check();
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
+            auto langs = tc->engine->listLanguages();
+            json arr = json::array();
+            for (const auto& l : langs) {
+                arr.push_back(l);
+            }
+            json meta = {{"total", langs.size()}};
+            V8Response::ok(args, arr, meta);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.parse(source?) -> bool - Parse text (defaults to active buffer)
+    // treesitter.parse(source?) -> {ok, data: bool}
     // Metni ayristir (varsayilan olarak aktif buffer)
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "parse"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
             auto* iso = args.GetIsolate();
 
             std::string source;
@@ -156,63 +194,93 @@ void RegisterTreeSitterBinding(v8::Isolate* isolate, v8::Local<v8::Object> edito
                 }
             }
 
-            args.GetReturnValue().Set(v8::Boolean::New(iso, tc->engine->parse(source)));
+            bool result = tc->engine->parse(source);
+            V8Response::ok(args, result);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.rootNode() -> node
+    // treesitter.rootNode() -> {ok, data: node}
     // Kok dugumunu al
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "rootNode"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
             auto node = tc->engine->rootNode();
-            args.GetReturnValue().Set(nodeToV8(iso, ctx, node));
+            V8Response::ok(args, nodeToJson(node));
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.nodeAt(line, col) -> node
+    // treesitter.nodeAt(line, col) -> {ok, data: node}
     // Konumdaki dugumu al
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "nodeAt"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine || args.Length() < 2) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "line, col"}}, tc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
             int line = args[0]->Int32Value(ctx).FromJust();
             int col  = args[1]->Int32Value(ctx).FromJust();
             auto node = tc->engine->nodeAt(line, col);
-            args.GetReturnValue().Set(nodeToV8(iso, ctx, node));
+            V8Response::ok(args, nodeToJson(node));
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.namedNodeAt(line, col) -> node
+    // treesitter.namedNodeAt(line, col) -> {ok, data: node}
     // Konumdaki adlandirilmis dugumu al
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "namedNodeAt"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine || args.Length() < 2) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "line, col"}}, tc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
             int line = args[0]->Int32Value(ctx).FromJust();
             int col  = args[1]->Int32Value(ctx).FromJust();
             auto node = tc->engine->namedNodeAt(line, col);
-            args.GetReturnValue().Set(nodeToV8(iso, ctx, node));
+            V8Response::ok(args, nodeToJson(node));
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.query(queryStr, source?, startLine?, endLine?) -> [match, ...]
+    // treesitter.query(queryStr, source?, startLine?, endLine?) -> {ok, data: [match, ...], meta: {total: N}}
     // Agac uzerinde sorgu calistir
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "query"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine || args.Length() < 1) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "queryStr"}}, tc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
@@ -234,85 +302,97 @@ void RegisterTreeSitterBinding(v8::Isolate* isolate, v8::Local<v8::Object> edito
 
             auto matches = tc->engine->query(queryStr, source, startLine, endLine);
 
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(matches.size()));
-            for (size_t i = 0; i < matches.size(); ++i) {
-                v8::Local<v8::Object> mObj = v8::Object::New(iso);
-                mObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "patternIndex"),
-                    v8::Integer::New(iso, matches[i].patternIndex)).Check();
-
-                v8::Local<v8::Array> capArr = v8::Array::New(iso,
-                    static_cast<int>(matches[i].captures.size()));
-                for (size_t j = 0; j < matches[i].captures.size(); ++j) {
-                    auto& cap = matches[i].captures[j];
-                    v8::Local<v8::Object> cObj = v8::Object::New(iso);
-                    cObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "name"),
-                        v8::String::NewFromUtf8(iso, cap.name.c_str()).ToLocalChecked()).Check();
-                    cObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "text"),
-                        v8::String::NewFromUtf8(iso, cap.text.c_str()).ToLocalChecked()).Check();
-                    cObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "startLine"),
-                        v8::Integer::New(iso, cap.startLine)).Check();
-                    cObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "startCol"),
-                        v8::Integer::New(iso, cap.startCol)).Check();
-                    cObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "endLine"),
-                        v8::Integer::New(iso, cap.endLine)).Check();
-                    cObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "endCol"),
-                        v8::Integer::New(iso, cap.endCol)).Check();
-                    capArr->Set(ctx, static_cast<uint32_t>(j), cObj).Check();
+            json arr = json::array();
+            for (const auto& m : matches) {
+                json capArr = json::array();
+                for (const auto& cap : m.captures) {
+                    capArr.push_back(json({
+                        {"name", cap.name},
+                        {"text", cap.text},
+                        {"startLine", cap.startLine},
+                        {"startCol", cap.startCol},
+                        {"endLine", cap.endLine},
+                        {"endCol", cap.endCol}
+                    }));
                 }
-                mObj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "captures"), capArr).Check();
-                arr->Set(ctx, static_cast<uint32_t>(i), mObj).Check();
+                arr.push_back(json({
+                    {"patternIndex", m.patternIndex},
+                    {"captures", capArr}
+                }));
             }
-            args.GetReturnValue().Set(arr);
+            json meta = {{"total", matches.size()}};
+            V8Response::ok(args, arr, meta);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.errors() -> [node, ...]
+    // treesitter.errors() -> {ok, data: [node, ...], meta: {total: N}}
     // Soz dizimi hatalarini al
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "errors"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-            auto errs = tc->engine->errors();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(errs.size()));
-            for (size_t i = 0; i < errs.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i), nodeToV8(iso, ctx, errs[i])).Check();
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
+            auto errs = tc->engine->errors();
+            json arr = json::array();
+            for (const auto& e : errs) {
+                arr.push_back(nodeToJson(e));
+            }
+            json meta = {{"total", errs.size()}};
+            V8Response::ok(args, arr, meta);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.hasTree() -> bool
+    // treesitter.hasTree() -> {ok, data: bool}
     // Agacin var olup olmadigini kontrol et
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "hasTree"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine) { args.GetReturnValue().Set(false); return; }
-            args.GetReturnValue().Set(v8::Boolean::New(args.GetIsolate(), tc->engine->hasTree()));
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            V8Response::ok(args, tc->engine->hasTree());
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.reset() - Free current tree
+    // treesitter.reset() -> {ok, data: true}
     // Mevcut agaci serbest birak
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "reset"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
             tc->engine->reset();
+            V8Response::ok(args, true);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 
-    // treesitter.editAndReparse(startLine, startCol, oldEndLine, oldEndCol, newEndLine, newEndCol, newSource) -> bool
+    // treesitter.editAndReparse(startLine, startCol, oldEndLine, oldEndCol, newEndLine, newEndCol, newSource) -> {ok, data: bool}
     // Duzenleme uygula ve artimsal olarak yeniden ayristir
     jsTS->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "editAndReparse"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
             auto* tc = static_cast<TSBindCtx*>(args.Data().As<v8::External>()->Value());
-            if (!tc || !tc->engine || args.Length() < 7) return;
+            if (!tc || !tc->engine) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "treeSitterEngine"}}, tc ? tc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 7) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "startLine, startCol, oldEndLine, oldEndCol, newEndLine, newEndCol, newSource"}}, tc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
@@ -324,10 +404,10 @@ void RegisterTreeSitterBinding(v8::Isolate* isolate, v8::Local<v8::Object> edito
             int newEndCol   = args[5]->Int32Value(ctx).FromJust();
             std::string newSource = v8Str(iso, args[6]);
 
-            bool ok = tc->engine->editAndReparse(
+            bool result = tc->engine->editAndReparse(
                 startLine, startCol, oldEndLine, oldEndCol,
                 newEndLine, newEndCol, newSource);
-            args.GetReturnValue().Set(v8::Boolean::New(iso, ok));
+            V8Response::ok(args, result);
         }, v8::External::New(isolate, tctx)).ToLocalChecked()
     ).Check();
 

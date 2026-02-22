@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "WasmBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "Logger.h"
 #include <v8.h>
 #include <fstream>
@@ -25,18 +31,27 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
     return *s ? *s : "";
 }
 
+// Context struct to pass i18n to lambda callbacks
+// Lambda callback'lere i18n isaretcisini aktarmak icin baglam yapisi
+struct WasmCtx {
+    I18n* i18n;
+};
+
 // Register editor.wasm JS binding
 // editor.wasm JS binding'ini kaydet
 void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& ctx) {
     auto context = isolate->GetCurrentContext();
     auto wasmObj = v8::Object::New(isolate);
 
-    // editor.wasm.isSupported() -> bool
+    auto* wctx = new WasmCtx{ctx.i18n};
+
+    // editor.wasm.isSupported() -> {ok, data: bool, ...}
     // V8 always supports WebAssembly, but check runtime flag
     // V8 her zaman WebAssembly destekler, ama calisma zamani bayragini kontrol et
     wasmObj->Set(context,
         v8::String::NewFromUtf8Literal(isolate, "isSupported"),
         v8::Function::New(context, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
+            auto* wc = static_cast<WasmCtx*>(args.Data().As<v8::External>()->Value());
             auto iso = args.GetIsolate();
             auto ctx2 = iso->GetCurrentContext();
 
@@ -46,31 +61,32 @@ void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
             bool supported = ctx2->Global()->Get(ctx2,
                 v8::String::NewFromUtf8Literal(iso, "WebAssembly")).ToLocal(&wasmGlobal)
                 && wasmGlobal->IsObject();
-            args.GetReturnValue().Set(supported);
-        }, v8::External::New(isolate, &ctx)).ToLocalChecked()
+            V8Response::ok(args, supported);
+        }, v8::External::New(isolate, wctx)).ToLocalChecked()
     ).Check();
 
-    // editor.wasm.loadFile(path) -> WebAssembly.Module
+    // editor.wasm.loadFile(path) -> WebAssembly.Module (raw V8 object, not wrapped)
     // Reads a .wasm file, compiles it into a WebAssembly.Module
     // Bir .wasm dosyasini okur, WebAssembly.Module'e derler
+    // NOTE: Returns raw V8 Module object since it must be used with WebAssembly.Instance constructor
+    // NOT: WebAssembly.Instance yapilandiriciyla kullanilmasi gerektigi icin ham V8 Module nesnesi dondurur
     wasmObj->Set(context,
         v8::String::NewFromUtf8Literal(isolate, "loadFile"),
         v8::Function::New(context, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
+            auto* wc = static_cast<WasmCtx*>(args.Data().As<v8::External>()->Value());
             auto iso = args.GetIsolate();
             auto ctx2 = iso->GetCurrentContext();
 
             if (args.Length() < 1) {
-                iso->ThrowException(v8::Exception::TypeError(
-                    v8::String::NewFromUtf8Literal(iso, "loadFile requires a file path")));
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "path"}}, wc ? wc->i18n : nullptr);
                 return;
             }
 
             std::string path = v8Str(iso, args[0]);
             std::vector<uint8_t> bytes = readBinaryFile(path);
             if (bytes.empty()) {
-                iso->ThrowException(v8::Exception::Error(
-                    v8::String::NewFromUtf8(iso,
-                        ("Failed to read WASM file: " + path).c_str()).ToLocalChecked()));
+                V8Response::error(args, "LOAD_ERROR", "wasm.loadfile.error",
+                    {{"path", path}}, wc ? wc->i18n : nullptr);
                 return;
             }
 
@@ -91,8 +107,7 @@ void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
             if (!ctx2->Global()->Get(ctx2,
                     v8::String::NewFromUtf8Literal(iso, "WebAssembly")).ToLocal(&wasmGlobal)
                 || !wasmGlobal->IsObject()) {
-                iso->ThrowException(v8::Exception::Error(
-                    v8::String::NewFromUtf8Literal(iso, "WebAssembly not available")));
+                V8Response::error(args, "WASM_UNAVAILABLE", "wasm.not_available", {}, wc ? wc->i18n : nullptr);
                 return;
             }
 
@@ -103,8 +118,7 @@ void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
             if (!wasmNs->Get(ctx2,
                     v8::String::NewFromUtf8Literal(iso, "Module")).ToLocal(&moduleCtor)
                 || !moduleCtor->IsFunction()) {
-                iso->ThrowException(v8::Exception::Error(
-                    v8::String::NewFromUtf8Literal(iso, "WebAssembly.Module not available")));
+                V8Response::error(args, "WASM_UNAVAILABLE", "wasm.module_not_available", {}, wc ? wc->i18n : nullptr);
                 return;
             }
 
@@ -119,23 +133,27 @@ void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
                 return;
             }
 
+            // Return raw V8 Module object (not wrapped in standard response)
+            // Ham V8 Module nesnesini dondur (standart yanita sarmalanmamis)
             args.GetReturnValue().Set(module);
             LOG_INFO("[WASM] Loaded module from: ", path);
-        }, v8::External::New(isolate, &ctx)).ToLocalChecked()
+        }, v8::External::New(isolate, wctx)).ToLocalChecked()
     ).Check();
 
-    // editor.wasm.instantiate(module, imports?) -> WebAssembly.Instance
+    // editor.wasm.instantiate(module, imports?) -> WebAssembly.Instance (raw V8 object)
     // Instantiate a WebAssembly.Module with optional imports
     // Istege bagli import'larla bir WebAssembly.Module ornekle
+    // NOTE: Returns raw V8 Instance object since it exposes exported functions directly
+    // NOT: Disa aktarilan fonksiyonlari dogrudan sundugundan ham V8 Instance nesnesi dondurur
     wasmObj->Set(context,
         v8::String::NewFromUtf8Literal(isolate, "instantiate"),
         v8::Function::New(context, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
+            auto* wc = static_cast<WasmCtx*>(args.Data().As<v8::External>()->Value());
             auto iso = args.GetIsolate();
             auto ctx2 = iso->GetCurrentContext();
 
             if (args.Length() < 1) {
-                iso->ThrowException(v8::Exception::TypeError(
-                    v8::String::NewFromUtf8Literal(iso, "instantiate requires a module")));
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "module"}}, wc ? wc->i18n : nullptr);
                 return;
             }
 
@@ -145,8 +163,7 @@ void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
             if (!ctx2->Global()->Get(ctx2,
                     v8::String::NewFromUtf8Literal(iso, "WebAssembly")).ToLocal(&wasmGlobal)
                 || !wasmGlobal->IsObject()) {
-                iso->ThrowException(v8::Exception::Error(
-                    v8::String::NewFromUtf8Literal(iso, "WebAssembly not available")));
+                V8Response::error(args, "WASM_UNAVAILABLE", "wasm.not_available", {}, wc ? wc->i18n : nullptr);
                 return;
             }
 
@@ -155,8 +172,7 @@ void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
             if (!wasmNs->Get(ctx2,
                     v8::String::NewFromUtf8Literal(iso, "Instance")).ToLocal(&instanceCtor)
                 || !instanceCtor->IsFunction()) {
-                iso->ThrowException(v8::Exception::Error(
-                    v8::String::NewFromUtf8Literal(iso, "WebAssembly.Instance not available")));
+                V8Response::error(args, "WASM_UNAVAILABLE", "wasm.instance_not_available", {}, wc ? wc->i18n : nullptr);
                 return;
             }
 
@@ -177,8 +193,10 @@ void RegisterWasmBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
                 }
             }
 
+            // Return raw V8 Instance object (not wrapped in standard response)
+            // Ham V8 Instance nesnesini dondur (standart yanita sarmalanmamis)
             args.GetReturnValue().Set(instance);
-        }, v8::External::New(isolate, &ctx)).ToLocalChecked()
+        }, v8::External::New(isolate, wctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(context,

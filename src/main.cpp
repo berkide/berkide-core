@@ -1,3 +1,8 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "buffer.h"
 #include "cursor.h"
 #include "undo.h"
@@ -34,6 +39,8 @@
 #include "IndentEngine.h"
 #include "WorkerManager.h"
 #include "BufferOptions.h"
+#include "I18n.h"
+#include "Config.h"
 #ifdef BERKIDE_TREESITTER_ENABLED
 #include "TreeSitterEngine.h"
 #endif
@@ -42,6 +49,11 @@
 #include <chrono>
 #include <string>
 #include <atomic>
+#ifdef _WIN32
+    #include <process.h>
+#else
+    #include <unistd.h>
+#endif
 
 // Global flag for graceful shutdown
 // Duzgun kapatma icin global bayrak
@@ -65,78 +77,92 @@ static std::atomic<bool> g_running{true};
     }
 #endif
 
-// Application configuration parsed from CLI arguments
-// CLI argumanlarindan ayristirilan uygulama yapilandirmasi
+// Build AppConfig from the unified Config singleton
+// Birlesik Config singleton'indan AppConfig olustur
 struct AppConfig {
     ServerConfig server;
     bool inspectorEnabled = false;
     bool inspectorBreak = false;
     int inspectorPort = 9229;
+    std::string locale = "en";          // UI language / Arayuz dili
 };
 
-// Parse command line arguments into AppConfig
-// Komut satiri argumanlarini AppConfig'e ayristir
-// Supported flags: --remote, --token=, --http-port=, --ws-port=, --port=, --tls-cert=, --tls-key=, --tls-ca=
-// Desteklenen bayraklar: --remote, --token=, --http-port=, --ws-port=, --port=, --tls-cert=, --tls-key=, --tls-ca=
-static AppConfig parseArgs(int argc, char* argv[]) {
-    AppConfig cfg;
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--remote") {
-            cfg.server.bindAddress = "0.0.0.0";
-        } else if (arg.rfind("--token=", 0) == 0) {
-            cfg.server.bearerToken = arg.substr(8);
-            cfg.server.requireAuth = true;
-        } else if (arg.rfind("--http-port=", 0) == 0) {
-            cfg.server.httpPort = std::stoi(arg.substr(12));
-        } else if (arg.rfind("--ws-port=", 0) == 0) {
-            cfg.server.wsPort = std::stoi(arg.substr(10));
-        } else if (arg.rfind("--port=", 0) == 0) {
-            cfg.server.httpPort = std::stoi(arg.substr(7));
-        } else if (arg.rfind("--tls-cert=", 0) == 0) {
-            cfg.server.tlsCertFile = arg.substr(11);
-            cfg.server.tlsEnabled = true;
-        } else if (arg.rfind("--tls-key=", 0) == 0) {
-            cfg.server.tlsKeyFile = arg.substr(10);
-            cfg.server.tlsEnabled = true;
-        } else if (arg.rfind("--tls-ca=", 0) == 0) {
-            cfg.server.tlsCaFile = arg.substr(9);
-        } else if (arg == "--inspect") {
-            cfg.inspectorEnabled = true;
-        } else if (arg == "--inspect-brk") {
-            cfg.inspectorEnabled = true;
-            cfg.inspectorBreak = true;
-        } else if (arg.rfind("--inspect-port=", 0) == 0) {
-            cfg.inspectorPort = std::stoi(arg.substr(15));
-            cfg.inspectorEnabled = true;
-        }
+// Populate AppConfig from Config singleton after all layers are loaded
+// Tum katmanlar yuklendikten sonra Config singleton'indan AppConfig'i doldur
+static AppConfig buildAppConfig() {
+    const Config& cfg = Config::instance();
+    AppConfig app;
+
+    app.server.bindAddress = cfg.getString("server.bind_address", "127.0.0.1");
+    app.server.httpPort    = cfg.getInt("server.http_port", 1881);
+    app.server.wsPort      = cfg.getInt("server.ws_port", 1882);
+
+    std::string token = cfg.getString("server.token", "");
+    if (!token.empty()) {
+        app.server.bearerToken = token;
+        app.server.requireAuth = true;
     }
 
-    if (cfg.server.bindAddress == "0.0.0.0" && cfg.server.bearerToken.empty()) {
-        LOG_WARN("--remote without --token is insecure. Use --token=SECRET.");
+    app.server.tlsEnabled  = cfg.getBool("server.tls.enabled", false);
+    app.server.tlsCertFile = cfg.getString("server.tls.cert", "");
+    app.server.tlsKeyFile  = cfg.getString("server.tls.key", "");
+    app.server.tlsCaFile   = cfg.getString("server.tls.ca", "NONE");
+
+    app.inspectorEnabled   = cfg.getBool("inspector.enabled", false);
+    app.inspectorBreak     = cfg.getBool("inspector.break_on_start", false);
+    app.inspectorPort      = cfg.getInt("inspector.port", 9229);
+    app.locale             = cfg.getString("locale", "en");
+
+    // Validate: --remote without --token is insecure
+    // Dogrulama: --remote --token olmadan guvenli degil
+    if (app.server.bindAddress == "0.0.0.0" && app.server.bearerToken.empty()) {
+        LOG_WARN("[Startup] --remote without --token is insecure. Use --token=SECRET.");
     }
 
     // Validate TLS configuration
     // TLS yapilandirmasini dogrula
-    if (cfg.server.tlsEnabled) {
-        if (cfg.server.tlsCertFile.empty() || cfg.server.tlsKeyFile.empty()) {
-            LOG_ERROR("TLS requires both --tls-cert= and --tls-key= flags.");
-            cfg.server.tlsEnabled = false;
+    if (app.server.tlsEnabled) {
+        if (app.server.tlsCertFile.empty() || app.server.tlsKeyFile.empty()) {
+            LOG_ERROR("[Startup] TLS requires both --tls-cert= and --tls-key= flags.");
+            app.server.tlsEnabled = false;
         }
 #ifndef BERKIDE_TLS_ENABLED
-        LOG_WARN("TLS flags provided but BerkIDE was built without TLS support. Use -DBERKIDE_USE_TLS=ON.");
-        cfg.server.tlsEnabled = false;
+        LOG_WARN("[Startup] TLS flags provided but BerkIDE was built without TLS support. Use -DBERKIDE_USE_TLS=ON.");
+        app.server.tlsEnabled = false;
 #endif
     }
 
-    return cfg;
+    return app;
 }
 
 // BerkIDE main entry point (headless server)
 // BerkIDE ana giris noktasi (basliksiz sunucu)
 int main(int argc, char *argv[])
 {
-    AppConfig appCfg = parseArgs(argc, argv);
+    // Load config layers: hardcoded defaults -> app config -> user config -> CLI args
+    // Config katmanlarini yukle: sabit varsayilanlar -> uygulama config -> kullanici config -> CLI argumanlar
+    auto& paths = berkide::BerkidePaths::instance();
+    Config& config = Config::instance();
+    config.loadFile(paths.appBerkide + "/config.jsonc");     // app defaults / uygulama varsayilanlari
+    config.loadFile(paths.userBerkide + "/config.jsonc");    // user override / kullanici gecersiz kilma
+    config.applyCliArgs(argc, argv);                         // CLI highest priority / CLI en yuksek oncelik
+
+    AppConfig appCfg = buildAppConfig();
+
+    // Configure logger from config: level + optional file logging
+    // Logger'i config'ten yapilandir: seviye + istege bagli dosya loglama
+    {
+        std::string logLevel = config.getString("log.level", "info");
+        if (logLevel == "debug")     Logger::instance().setLevel(LogLevel::Debug);
+        else if (logLevel == "warn") Logger::instance().setLevel(LogLevel::Warn);
+        else if (logLevel == "error")Logger::instance().setLevel(LogLevel::Error);
+        else                         Logger::instance().setLevel(LogLevel::Info);
+
+        if (config.getBool("log.file", false)) {
+            std::string logDir = paths.appRoot + "/" + config.getString("log.path", "logs");
+            Logger::instance().enableFileLog(logDir);
+        }
+    }
 
     // Create all core editor objects
     // Tum temel editor nesnelerini olustur
@@ -174,6 +200,28 @@ int main(int argc, char *argv[])
     TreeSitterEngine treeSitterEng;
 #endif
 
+    // Initialize i18n system and load locale files
+    // i18n sistemini baslat ve yerel ayar dosyalarini yukle
+    I18n& i18n = I18n::instance();
+    i18n.setLocale(appCfg.locale);
+    {
+        std::string appLocales = paths.appBerkide + "/locales";
+        std::string userLocales = paths.userBerkide + "/locales";
+
+        // Load app locales first, then user overrides
+        // Once uygulama yerel ayarlarini yukle, sonra kullanici gecersiz kilmalari
+        for (const auto& dir : {appLocales, userLocales}) {
+            if (std::filesystem::exists(dir)) {
+                for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+                    if (entry.path().extension() == ".json") {
+                        std::string loc = entry.path().stem().string();
+                        i18n.loadLocaleFile(loc, entry.path().string());
+                    }
+                }
+            }
+        }
+    }
+
     // EditorContext: connects real objects to V8 bindings
     // EditorContext: gercek nesneleri V8 binding'lerine baglar
     EditorContext edCtx;
@@ -204,6 +252,7 @@ int main(int argc, char *argv[])
     edCtx.indentEngine     = &indentEngine;
     edCtx.workerManager    = &workerMgr;
     edCtx.bufferOptions    = &bufferOpts;
+    edCtx.i18n             = &i18n;
 #ifdef BERKIDE_TREESITTER_ENABLED
     edCtx.treeSitter     = &treeSitterEng;
 #endif
@@ -215,13 +264,14 @@ int main(int argc, char *argv[])
     procMgr.setEventBus(&event);
     autoSave.setBuffers(&bufs);
     autoSave.setEventBus(&event);
-    autoSave.setDirectory(berkide::BerkidePaths::instance().userBerkide + "/autosave");
-    sessionMgr.setSessionPath(berkide::BerkidePaths::instance().userBerkide + "/session.json");
+    autoSave.setDirectory(paths.userBerkide + "/autosave");
+    autoSave.setInterval(config.getInt("autosave.interval", 30));
+    sessionMgr.setSessionPath(paths.userBerkide + "/session.json");
     httpServer.setEditorContext(&edCtx);
     wsServer.setEditorContext(&edCtx);
 
     try {
-        LOG_INFO("BerkIDE v", BERKIDE_VERSION, " starting...");
+        LOG_INFO("[Startup] BerkIDE starting...");
 
         // Initialize V8 engine, load plugins, start file watcher
         // V8 motorunu baslat, eklentileri yukle, dosya izleyicisini baslat
@@ -239,11 +289,11 @@ int main(int argc, char *argv[])
 
         CreateInitBerkideAndLoad(eng);
         LoadBerkideEnvironment(eng);
-        StartPluginWatcher(eng);
+        StartWatchers();
 
         // Start HTTP + WS servers
         // HTTP + WS sunucularini baslat
-        LOG_INFO("Starting servers...");
+        LOG_INFO("[Startup] Starting servers...");
         httpServer.start(appCfg.server);
         wsServer.start(appCfg.server);
 
@@ -251,7 +301,7 @@ int main(int argc, char *argv[])
         // Otomatik kaydetme arka plan thread'ini baslat
         autoSave.start();
 
-        LOG_INFO("BerkIDE running. Press Ctrl+C to stop.");
+        LOG_INFO("[Startup] BerkIDE running. Press Ctrl+C to stop.");
 
         // Register platform-specific signal handlers
         // Platforma ozgu sinyal isleyicilerini kaydet
@@ -262,9 +312,13 @@ int main(int argc, char *argv[])
         std::signal(SIGTERM, signalHandler);
 #endif
 
-        // Main event loop: wait for shutdown signal, pump inspector messages
-        // Ana olay dongusu: kapatma sinyalini bekle, inspector mesajlarini isle
+        // Main event loop: wait for shutdown signal or restart request
+        // Ana olay dongusu: kapatma sinyalini veya yeniden baslatma istegini bekle
         while (g_running) {
+            if (g_restartRequested.load()) {
+                LOG_INFO("[Startup] File change detected, restarting...");
+                break;
+            }
             eng.pumpInspectorMessages();
             workerMgr.processPendingMessages();
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -272,19 +326,35 @@ int main(int argc, char *argv[])
 
         // Graceful shutdown: save session, kill child processes, then stop servers
         // Duzgun kapatma: oturumu kaydet, once alt surecleri durdur, sonra sunuculari kapat
-        LOG_INFO("Shutting down...");
+        LOG_INFO("[Shutdown] Shutting down...");
         workerMgr.terminateAll();
         sessionMgr.save(bufs);
         autoSave.stop();
         procMgr.shutdownAll();
+        StopWatchers();
         httpServer.stop();
         wsServer.stop();
 
         ShutdownEngine(eng);
-        LOG_INFO("BerkIDE shut down successfully.");
+
+        // If restart was requested (not Ctrl+C), re-exec the process (nodemon-style)
+        // Yeniden baslatma istendiyse (Ctrl+C degil), process'i yeniden calistir (nodemon tarzi)
+        if (g_restartRequested.load() && g_running.load()) {
+            LOG_INFO("[Startup] Restarting process...");
+#ifdef _WIN32
+            _execv(argv[0], argv);
+#else
+            execv(argv[0], argv);
+#endif
+            // execv only returns on failure
+            // execv sadece basarisiz olursa doner
+            LOG_ERROR("[Startup] Failed to restart process");
+        }
+
+        LOG_INFO("[Shutdown] BerkIDE shut down successfully.");
     }
     catch (const std::exception& e) {
-        LOG_ERROR("Error: ", e.what());
+        LOG_ERROR("[Startup] Error: ", e.what());
     }
 
     return 0;

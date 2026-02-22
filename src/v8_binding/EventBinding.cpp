@@ -1,10 +1,23 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "EventBinding.h"
 #include "EventBus.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "Logger.h"
 #include <v8.h>
 #include <memory>
+
+// Context struct to pass event bus pointer and i18n to lambda callbacks
+// Lambda callback'lere hem event bus hem i18n isaretcisini aktarmak icin baglam yapisi
+struct EventCtx {
+    EventBus* bus;
+    I18n* i18n;
+};
 
 // Register event bus API on editor.events JS object (on, once, emit, emitSync, shutdown)
 // editor.events JS nesnesine event bus API'sini kaydet (on, once, emit, emitSync, shutdown)
@@ -14,7 +27,8 @@ void RegisterEventBinding(v8::Isolate* isolate,
 {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsEvents = v8::Object::New(isolate);
-    EventBus* bus = ctx.eventBus;
+
+    auto* ectx = new EventCtx{ctx.eventBus, ctx.i18n};
 
     // on(eventName, callback): subscribe to an event with a persistent JS callback
     // on(eventName, callback): kalici bir JS callback ile bir olaya abone ol
@@ -23,8 +37,19 @@ void RegisterEventBinding(v8::Isolate* isolate,
         v8::Function::New(v8ctx,
             [](const v8::FunctionCallbackInfo<v8::Value>& args)
             {
-                if (args.Length() < 2) return;
-                if (!args[0]->IsString() || !args[1]->IsFunction()) return;
+                auto* ec = static_cast<EventCtx*>(args.Data().As<v8::External>()->Value());
+                if (!ec || !ec->bus) {
+                    V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, ec ? ec->i18n : nullptr);
+                    return;
+                }
+                if (args.Length() < 2) {
+                    V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "eventName, callback"}}, ec->i18n);
+                    return;
+                }
+                if (!args[0]->IsString() || !args[1]->IsFunction()) {
+                    V8Response::error(args, "INVALID_ARG", "args.invalid_type", {{"name", "eventName, callback"}}, ec->i18n);
+                    return;
+                }
 
                 v8::Isolate* iso = args.GetIsolate();
                 v8::String::Utf8Value evName(iso, args[0]);
@@ -34,8 +59,9 @@ void RegisterEventBinding(v8::Isolate* isolate,
                 auto holder = std::make_shared<v8::Global<v8::Function>>(iso, callback);
                 auto pctx = std::make_shared<v8::Global<v8::Context>>(iso, iso->GetCurrentContext());
 
-                EventBus* eb = static_cast<EventBus*>(args.Data().As<v8::External>()->Value());
-                eb->on(name,
+                // Listener callback remains raw (fire-and-forget)
+                // Dinleyici callback'i ham kalir (atesle-ve-unut)
+                ec->bus->on(name,
                     [holder, pctx, iso](const EventBus::Event& e)
                     {
                         v8::Locker locker(iso);
@@ -50,8 +76,10 @@ void RegisterEventBinding(v8::Isolate* isolate,
 
                         (void) fn->Call(context, context->Global(), 2, argv);
                     });
+
+                V8Response::ok(args, true);
             },
-            v8::External::New(isolate, bus)
+            v8::External::New(isolate, ectx)
         ).ToLocalChecked()
     ).Check();
 
@@ -62,8 +90,19 @@ void RegisterEventBinding(v8::Isolate* isolate,
         v8::Function::New(v8ctx,
             [](const v8::FunctionCallbackInfo<v8::Value>& args)
             {
-                if (args.Length() < 2) return;
-                if (!args[0]->IsString() || !args[1]->IsFunction()) return;
+                auto* ec = static_cast<EventCtx*>(args.Data().As<v8::External>()->Value());
+                if (!ec || !ec->bus) {
+                    V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, ec ? ec->i18n : nullptr);
+                    return;
+                }
+                if (args.Length() < 2) {
+                    V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "eventName, callback"}}, ec->i18n);
+                    return;
+                }
+                if (!args[0]->IsString() || !args[1]->IsFunction()) {
+                    V8Response::error(args, "INVALID_ARG", "args.invalid_type", {{"name", "eventName, callback"}}, ec->i18n);
+                    return;
+                }
 
                 v8::Isolate* iso = args.GetIsolate();
                 v8::String::Utf8Value evName(iso, args[0]);
@@ -73,8 +112,9 @@ void RegisterEventBinding(v8::Isolate* isolate,
                 auto holder = std::make_shared<v8::Global<v8::Function>>(iso, callback);
                 auto pctx = std::make_shared<v8::Global<v8::Context>>(iso, iso->GetCurrentContext());
 
-                EventBus* eb = static_cast<EventBus*>(args.Data().As<v8::External>()->Value());
-                eb->once(name,
+                // Listener callback remains raw (fire-and-forget)
+                // Dinleyici callback'i ham kalir (atesle-ve-unut)
+                ec->bus->once(name,
                     [holder, pctx, iso](const EventBus::Event& e)
                     {
                         v8::Locker locker(iso);
@@ -90,8 +130,10 @@ void RegisterEventBinding(v8::Isolate* isolate,
                         (void) fn->Call(context, context->Global(), 2, argv);
                         // shared_ptr auto-cleans when EventBus removes the handler
                     });
+
+                V8Response::ok(args, true);
             },
-            v8::External::New(isolate, bus)
+            v8::External::New(isolate, ectx)
         ).ToLocalChecked()
     ).Check();
 
@@ -102,8 +144,19 @@ void RegisterEventBinding(v8::Isolate* isolate,
         v8::Function::New(v8ctx,
             [](const v8::FunctionCallbackInfo<v8::Value>& args)
             {
-                if (args.Length() < 1) return;
-                if (!args[0]->IsString()) return;
+                auto* ec = static_cast<EventCtx*>(args.Data().As<v8::External>()->Value());
+                if (!ec || !ec->bus) {
+                    V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, ec ? ec->i18n : nullptr);
+                    return;
+                }
+                if (args.Length() < 1) {
+                    V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "eventName"}}, ec->i18n);
+                    return;
+                }
+                if (!args[0]->IsString()) {
+                    V8Response::error(args, "INVALID_ARG", "args.invalid_type", {{"name", "eventName"}}, ec->i18n);
+                    return;
+                }
 
                 v8::Isolate* iso = args.GetIsolate();
                 v8::String::Utf8Value evName(iso, args[0]);
@@ -115,10 +168,10 @@ void RegisterEventBinding(v8::Isolate* isolate,
                     payload = *p ? *p : "{}";
                 }
 
-                EventBus* eb = static_cast<EventBus*>(args.Data().As<v8::External>()->Value());
-                eb->emit(name, payload);
+                ec->bus->emit(name, payload);
+                V8Response::ok(args, true);
             },
-            v8::External::New(isolate, bus)
+            v8::External::New(isolate, ectx)
         ).ToLocalChecked()
     ).Check();
 
@@ -129,8 +182,19 @@ void RegisterEventBinding(v8::Isolate* isolate,
         v8::Function::New(v8ctx,
             [](const v8::FunctionCallbackInfo<v8::Value>& args)
             {
-                if (args.Length() < 1) return;
-                if (!args[0]->IsString()) return;
+                auto* ec = static_cast<EventCtx*>(args.Data().As<v8::External>()->Value());
+                if (!ec || !ec->bus) {
+                    V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, ec ? ec->i18n : nullptr);
+                    return;
+                }
+                if (args.Length() < 1) {
+                    V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "eventName"}}, ec->i18n);
+                    return;
+                }
+                if (!args[0]->IsString()) {
+                    V8Response::error(args, "INVALID_ARG", "args.invalid_type", {{"name", "eventName"}}, ec->i18n);
+                    return;
+                }
 
                 v8::Isolate* iso = args.GetIsolate();
                 v8::String::Utf8Value evName(iso, args[0]);
@@ -142,10 +206,10 @@ void RegisterEventBinding(v8::Isolate* isolate,
                     payload = *p ? *p : "{}";
                 }
 
-                EventBus* eb = static_cast<EventBus*>(args.Data().As<v8::External>()->Value());
-                eb->emitSync(name, payload);
+                ec->bus->emitSync(name, payload);
+                V8Response::ok(args, true);
             },
-            v8::External::New(isolate, bus)
+            v8::External::New(isolate, ectx)
         ).ToLocalChecked()
     ).Check();
 
@@ -156,10 +220,15 @@ void RegisterEventBinding(v8::Isolate* isolate,
         v8::Function::New(v8ctx,
             [](const v8::FunctionCallbackInfo<v8::Value>& args)
             {
-                EventBus* eb = static_cast<EventBus*>(args.Data().As<v8::External>()->Value());
-                eb->shutdown();
+                auto* ec = static_cast<EventCtx*>(args.Data().As<v8::External>()->Value());
+                if (!ec || !ec->bus) {
+                    V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, ec ? ec->i18n : nullptr);
+                    return;
+                }
+                ec->bus->shutdown();
+                V8Response::ok(args, true);
             },
-            v8::External::New(isolate, bus)
+            v8::External::New(isolate, ectx)
         ).ToLocalChecked()
     ).Check();
 
@@ -170,17 +239,28 @@ void RegisterEventBinding(v8::Isolate* isolate,
         v8::Function::New(v8ctx,
             [](const v8::FunctionCallbackInfo<v8::Value>& args)
             {
-                if (args.Length() < 1) return;
-                if (!args[0]->IsString()) return;
+                auto* ec = static_cast<EventCtx*>(args.Data().As<v8::External>()->Value());
+                if (!ec || !ec->bus) {
+                    V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, ec ? ec->i18n : nullptr);
+                    return;
+                }
+                if (args.Length() < 1) {
+                    V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "eventName"}}, ec->i18n);
+                    return;
+                }
+                if (!args[0]->IsString()) {
+                    V8Response::error(args, "INVALID_ARG", "args.invalid_type", {{"name", "eventName"}}, ec->i18n);
+                    return;
+                }
 
                 v8::Isolate* iso = args.GetIsolate();
                 v8::String::Utf8Value evName(iso, args[0]);
                 std::string name = *evName ? *evName : "";
 
-                EventBus* eb = static_cast<EventBus*>(args.Data().As<v8::External>()->Value());
-                eb->off(name);
+                ec->bus->off(name);
+                V8Response::ok(args, true);
             },
-            v8::External::New(isolate, bus)
+            v8::External::New(isolate, ectx)
         ).ToLocalChecked()
     ).Check();
 

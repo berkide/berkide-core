@@ -1,102 +1,130 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "HelpBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "HelpSystem.h"
 #include <v8.h>
 
-// Helper: convert HelpTopic to V8 object
-// Yardimci: HelpTopic'i V8 nesnesine cevir
-static v8::Local<v8::Object> topicToV8(v8::Isolate* isolate, const HelpTopic* topic) {
-    auto ctx = isolate->GetCurrentContext();
-    v8::Local<v8::Object> obj = v8::Object::New(isolate);
-
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "id"),
-        v8::String::NewFromUtf8(isolate, topic->id.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "title"),
-        v8::String::NewFromUtf8(isolate, topic->title.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "content"),
-        v8::String::NewFromUtf8(isolate, topic->content.c_str()).ToLocalChecked()).Check();
-
-    v8::Local<v8::Array> tags = v8::Array::New(isolate, static_cast<int>(topic->tags.size()));
-    for (size_t i = 0; i < topic->tags.size(); ++i) {
-        tags->Set(ctx, static_cast<uint32_t>(i),
-            v8::String::NewFromUtf8(isolate, topic->tags[i].c_str()).ToLocalChecked()).Check();
+// Helper: convert HelpTopic to nlohmann::json
+// Yardimci: HelpTopic'i nlohmann::json'a cevir
+static json topicToJson(const HelpTopic* topic) {
+    json tags = json::array();
+    for (const auto& t : topic->tags) {
+        tags.push_back(t);
     }
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "tags"), tags).Check();
-
-    return obj;
+    return json({
+        {"id", topic->id},
+        {"title", topic->title},
+        {"content", topic->content},
+        {"tags", tags}
+    });
 }
+
+// Helper: convert HelpTopic to summary json (without content for efficiency)
+// Yardimci: HelpTopic'i ozet json'a cevir (verimlilik icin icerik olmadan)
+static json topicSummaryToJson(const HelpTopic* topic) {
+    json tags = json::array();
+    for (const auto& t : topic->tags) {
+        tags.push_back(t);
+    }
+    return json({
+        {"id", topic->id},
+        {"title", topic->title},
+        {"tags", tags}
+    });
+}
+
+// Context struct to pass help system pointer and i18n to lambda callbacks
+// Lambda callback'lere hem yardim sistemi hem i18n isaretcisini aktarmak icin baglam yapisi
+struct HelpCtx {
+    HelpSystem* hs;
+    I18n* i18n;
+};
 
 // Register editor.help JS object with show(topic), search(query), list()
 // editor.help JS nesnesini show(topic), search(query), list() ile kaydet
 void RegisterHelpBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& ctx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsHelp = v8::Object::New(isolate);
-    HelpSystem* hs = ctx.helpSystem;
 
-    // help.show(topicId) -> {id, title, content, tags} or undefined
+    auto* hctx = new HelpCtx{ctx.helpSystem, ctx.i18n};
+
+    // help.show(topicId) -> {ok, data: {id, title, content, tags}, ...}
+    // Yardim konusunu goster
     jsHelp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "show"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* hs = static_cast<HelpSystem*>(args.Data().As<v8::External>()->Value());
-            if (!hs) return;
+            auto* hc = static_cast<HelpCtx*>(args.Data().As<v8::External>()->Value());
+            if (!hc || !hc->hs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, hc ? hc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "topicId"}}, hc->i18n);
+                return;
+            }
             v8::String::Utf8Value id(args.GetIsolate(), args[0]);
-            auto* topic = hs->getTopic(*id ? *id : "");
-            if (!topic) return;
-            args.GetReturnValue().Set(topicToV8(args.GetIsolate(), topic));
-        }, v8::External::New(isolate, hs)).ToLocalChecked()
+            std::string topicId = *id ? *id : "";
+            auto* topic = hc->hs->getTopic(topicId);
+            if (!topic) {
+                V8Response::error(args, "NOT_FOUND", "help.topic.not_found",
+                    {{"id", topicId}}, hc->i18n);
+                return;
+            }
+            V8Response::ok(args, topicToJson(topic));
+        }, v8::External::New(isolate, hctx)).ToLocalChecked()
     ).Check();
 
-    // help.search(query) -> [{id, title, content, tags}, ...]
+    // help.search(query) -> {ok, data: [{id, title, content, tags}, ...], meta: {total: N}}
+    // Yardim konularinda ara
     jsHelp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "search"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            if (args.Length() < 1) return;
-            auto* hs = static_cast<HelpSystem*>(args.Data().As<v8::External>()->Value());
-            if (!hs) return;
-            auto* isolate = args.GetIsolate();
-            auto ctx = isolate->GetCurrentContext();
-            v8::String::Utf8Value query(isolate, args[0]);
-            auto results = hs->search(*query ? *query : "");
-
-            v8::Local<v8::Array> arr = v8::Array::New(isolate, static_cast<int>(results.size()));
-            for (size_t i = 0; i < results.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i), topicToV8(isolate, results[i])).Check();
+            auto* hc = static_cast<HelpCtx*>(args.Data().As<v8::External>()->Value());
+            if (!hc || !hc->hs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, hc ? hc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, hs)).ToLocalChecked()
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "query"}}, hc->i18n);
+                return;
+            }
+            v8::String::Utf8Value query(args.GetIsolate(), args[0]);
+            auto results = hc->hs->search(*query ? *query : "");
+
+            json arr = json::array();
+            for (const auto* topic : results) {
+                arr.push_back(topicToJson(topic));
+            }
+            json meta = {{"total", results.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, hctx)).ToLocalChecked()
     ).Check();
 
-    // help.list() -> [{id, title, tags}, ...] (without full content for efficiency)
+    // help.list() -> {ok, data: [{id, title, tags}, ...], meta: {total: N}}
+    // Tum yardim konularini listele (verimlilik icin icerik olmadan)
     jsHelp->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* hs = static_cast<HelpSystem*>(args.Data().As<v8::External>()->Value());
-            if (!hs) return;
-            auto* isolate = args.GetIsolate();
-            auto ctx = isolate->GetCurrentContext();
-            auto topics = hs->listTopics();
-
-            v8::Local<v8::Array> arr = v8::Array::New(isolate, static_cast<int>(topics.size()));
-            for (size_t i = 0; i < topics.size(); ++i) {
-                v8::Local<v8::Object> obj = v8::Object::New(isolate);
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "id"),
-                    v8::String::NewFromUtf8(isolate, topics[i]->id.c_str()).ToLocalChecked()).Check();
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "title"),
-                    v8::String::NewFromUtf8(isolate, topics[i]->title.c_str()).ToLocalChecked()).Check();
-
-                v8::Local<v8::Array> tags = v8::Array::New(isolate, static_cast<int>(topics[i]->tags.size()));
-                for (size_t j = 0; j < topics[i]->tags.size(); ++j) {
-                    tags->Set(ctx, static_cast<uint32_t>(j),
-                        v8::String::NewFromUtf8(isolate, topics[i]->tags[j].c_str()).ToLocalChecked()).Check();
-                }
-                obj->Set(ctx, v8::String::NewFromUtf8Literal(isolate, "tags"), tags).Check();
-
-                arr->Set(ctx, static_cast<uint32_t>(i), obj).Check();
+            auto* hc = static_cast<HelpCtx*>(args.Data().As<v8::External>()->Value());
+            if (!hc || !hc->hs) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_context", {}, hc ? hc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, hs)).ToLocalChecked()
+            auto topics = hc->hs->listTopics();
+
+            json arr = json::array();
+            for (const auto* topic : topics) {
+                arr.push_back(topicSummaryToJson(topic));
+            }
+            json meta = {{"total", topics.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, hctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

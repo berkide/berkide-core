@@ -31,8 +31,10 @@ cmake --build "${BUILD_DIR}" -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
 echo "Build complete (${BUILD_TYPE}, TLS=${USE_TLS}). Binary: ${BUILD_DIR}/berkide"
 
-# Copy runtime if exists
-if [ -d ".berkide" ] && [ ! -d "${BUILD_DIR}/.berkide" ]; then
+# Sync runtime to build directory (always update, not just first time)
+# Runtime dosyalarini build dizinine senkronize et (her zaman guncelle)
+if [ -d ".berkide" ]; then
+    rm -rf "${BUILD_DIR}/.berkide"
     cp -r .berkide "${BUILD_DIR}/.berkide"
-    echo "Copied .berkide runtime to build directory."
+    echo "Synced .berkide runtime to build directory."
 fi

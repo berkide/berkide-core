@@ -1,3 +1,8 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #pragma once
 #include <functional>
 #include <string>
@@ -45,3 +50,13 @@ private:
     std::unordered_map<std::string, BindingRegisterFunc> map_;   // Name -> function map / Isim -> fonksiyon haritasi
     std::vector<std::string> order_;                              // Registration order / Kayit sirasi
 };
+
+// =============================================================================
+// REGISTER_BINDING macro — ensures the linker includes the binding's .o file.
+// Yeni binding eklemek icin:
+//   1. XxxBinding.h / XxxBinding.cpp olustur (RegisterXxxBinding fonksiyonu ile)
+//   2. BindingRegistry.cpp'ye REGISTER_BINDING(Xxx) ekle
+// =============================================================================
+#define REGISTER_BINDING(Name) \
+    extern void Register##Name##Binding(v8::Isolate*, v8::Local<v8::Object>, EditorContext&); \
+    __attribute__((used)) static void* _force_link_##Name = (void*)&Register##Name##Binding;

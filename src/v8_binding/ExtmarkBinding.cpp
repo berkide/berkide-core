@@ -1,6 +1,12 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "ExtmarkBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "Extmark.h"
 #include <v8.h>
 
@@ -11,29 +17,27 @@ static std::string v8Str(v8::Isolate* iso, v8::Local<v8::Value> val) {
     return *s ? *s : "";
 }
 
-// Helper: convert Extmark to V8 object
-// Yardimci: Extmark'i V8 nesnesine cevir
-static v8::Local<v8::Object> extmarkToV8(v8::Isolate* iso, v8::Local<v8::Context> ctx,
-                                           const Extmark& em) {
-    v8::Local<v8::Object> obj = v8::Object::New(iso);
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "id"),
-        v8::Integer::New(iso, em.id)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "startLine"),
-        v8::Integer::New(iso, em.startLine)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "startCol"),
-        v8::Integer::New(iso, em.startCol)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "endLine"),
-        v8::Integer::New(iso, em.endLine)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "endCol"),
-        v8::Integer::New(iso, em.endCol)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "ns"),
-        v8::String::NewFromUtf8(iso, em.ns.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "type"),
-        v8::String::NewFromUtf8(iso, em.type.c_str()).ToLocalChecked()).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "data"),
-        v8::String::NewFromUtf8(iso, em.data.c_str()).ToLocalChecked()).Check();
-    return obj;
+// Helper: convert Extmark to json object
+// Yardimci: Extmark'i json nesnesine cevir
+static json extmarkToJson(const Extmark& em) {
+    return json({
+        {"id", em.id},
+        {"startLine", em.startLine},
+        {"startCol", em.startCol},
+        {"endLine", em.endLine},
+        {"endCol", em.endCol},
+        {"ns", em.ns},
+        {"type", em.type},
+        {"data", em.data}
+    });
 }
+
+// Context struct for extmark binding lambdas
+// Extmark binding lambda'lari icin baglam yapisi
+struct ExtmarkCtx {
+    ExtmarkManager* mgr;
+    I18n* i18n;
+};
 
 // Register editor.extmarks JS object
 // editor.extmarks JS nesnesini kaydet
@@ -41,85 +45,130 @@ void RegisterExtmarkBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsExt = v8::Object::New(isolate);
 
-    auto* mgr = edCtx.extmarkManager;
+    auto* ectx = new ExtmarkCtx{edCtx.extmarkManager, edCtx.i18n};
 
-    // extmarks.set(ns, startLine, startCol, endLine, endCol, type?, data?) -> id
+    // extmarks.set(ns, startLine, startCol, endLine, endCol, type?, data?) -> {ok, data: id, ...}
     // Yeni extmark ekle, kimligini dondur
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "set"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 5) return;
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 5) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "ns, startLine, startCol, endLine, endCol"}}, ec->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
+            auto ctx = iso->GetCurrentContext();
 
             std::string ns = v8Str(iso, args[0]);
-            int sLine = args[1]->Int32Value(iso->GetCurrentContext()).FromJust();
-            int sCol  = args[2]->Int32Value(iso->GetCurrentContext()).FromJust();
-            int eLine = args[3]->Int32Value(iso->GetCurrentContext()).FromJust();
-            int eCol  = args[4]->Int32Value(iso->GetCurrentContext()).FromJust();
+            int sLine = args[1]->Int32Value(ctx).FromJust();
+            int sCol  = args[2]->Int32Value(ctx).FromJust();
+            int eLine = args[3]->Int32Value(ctx).FromJust();
+            int eCol  = args[4]->Int32Value(ctx).FromJust();
 
             std::string type = (args.Length() > 5) ? v8Str(iso, args[5]) : "";
             std::string data = (args.Length() > 6) ? v8Str(iso, args[6]) : "";
 
-            int id = m->set(ns, sLine, sCol, eLine, eCol, type, data);
-            args.GetReturnValue().Set(v8::Integer::New(iso, id));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            int id = ec->mgr->set(ns, sLine, sCol, eLine, eCol, type, data);
+            V8Response::ok(args, id);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.get(id) -> extmark | null
+    // extmarks.get(id) -> {ok, data: extmark | null, ...}
     // Kimlige gore extmark al
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "get"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            int id = args[0]->Int32Value(ctx).FromJust();
-            const Extmark* em = m->get(id);
-            if (em) {
-                args.GetReturnValue().Set(extmarkToV8(iso, ctx, *em));
-            } else {
-                args.GetReturnValue().SetNull();
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
             }
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "id"}}, ec->i18n);
+                return;
+            }
+            auto* iso = args.GetIsolate();
+            int id = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
+            const Extmark* em = ec->mgr->get(id);
+            if (em) {
+                V8Response::ok(args, extmarkToJson(*em));
+            } else {
+                V8Response::ok(args, nullptr);
+            }
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.remove(id) -> bool
+    // extmarks.remove(id) -> {ok, data: bool, ...}
     // Kimlige gore extmark sil
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "remove"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "id"}}, ec->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int id = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Boolean::New(iso, m->remove(id)));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            bool removed = ec->mgr->remove(id);
+            V8Response::ok(args, removed);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.clearNamespace(ns) -> number removed
+    // extmarks.clearNamespace(ns) -> {ok, data: removedCount, ...}
     // Ad alanindaki tum extmark'lari sil
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clearNamespace"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "ns"}}, ec->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             std::string ns = v8Str(iso, args[0]);
-            int count = m->clearNamespace(ns);
-            args.GetReturnValue().Set(v8::Integer::New(iso, count));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            int count = ec->mgr->clearNamespace(ns);
+            V8Response::ok(args, count);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.getInRange(startLine, endLine, ns?) -> [extmark, ...]
+    // extmarks.getInRange(startLine, endLine, ns?) -> {ok, data: [extmark, ...], meta: {total: N}, ...}
     // Satir araligindaki extmark'lari al
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getInRange"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 2) return;
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "startLine, endLine"}}, ec->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
@@ -127,87 +176,120 @@ void RegisterExtmarkBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
             int eLine = args[1]->Int32Value(ctx).FromJust();
             std::string ns = (args.Length() > 2) ? v8Str(iso, args[2]) : "";
 
-            auto marks = m->getInRange(sLine, eLine, ns);
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(marks.size()));
+            auto marks = ec->mgr->getInRange(sLine, eLine, ns);
+            json arr = json::array();
             for (size_t i = 0; i < marks.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i), extmarkToV8(iso, ctx, *marks[i])).Check();
+                arr.push_back(extmarkToJson(*marks[i]));
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            json meta = {{"total", marks.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.getOnLine(line, ns?) -> [extmark, ...]
+    // extmarks.getOnLine(line, ns?) -> {ok, data: [extmark, ...], meta: {total: N}, ...}
     // Belirli bir satirdaki extmark'lari al
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getOnLine"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "line"}}, ec->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
             int line = args[0]->Int32Value(ctx).FromJust();
             std::string ns = (args.Length() > 1) ? v8Str(iso, args[1]) : "";
 
-            auto marks = m->getOnLine(line, ns);
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(marks.size()));
+            auto marks = ec->mgr->getOnLine(line, ns);
+            json arr = json::array();
             for (size_t i = 0; i < marks.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i), extmarkToV8(iso, ctx, *marks[i])).Check();
+                arr.push_back(extmarkToJson(*marks[i]));
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            json meta = {{"total", marks.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.list(ns?) -> [extmark, ...]
+    // extmarks.list(ns?) -> {ok, data: [extmark, ...], meta: {total: N}, ...}
     // Tum extmark'lari listele
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m) return;
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
             auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
 
             std::string ns = (args.Length() > 0) ? v8Str(iso, args[0]) : "";
-            auto marks = m->list(ns);
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(marks.size()));
+            auto marks = ec->mgr->list(ns);
+            json arr = json::array();
             for (size_t i = 0; i < marks.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i), extmarkToV8(iso, ctx, *marks[i])).Check();
+                arr.push_back(extmarkToJson(*marks[i]));
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            json meta = {{"total", marks.size()}};
+            V8Response::ok(args, arr, meta);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.count() -> number
+    // extmarks.count() -> {ok, data: number, ...}
     // Toplam extmark sayisini al
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "count"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m) return;
-            args.GetReturnValue().Set(v8::Integer::New(args.GetIsolate(),
-                static_cast<int>(m->count())));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            int count = static_cast<int>(ec->mgr->count());
+            V8Response::ok(args, count);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.clearAll()
+    // extmarks.clearAll() -> {ok, data: true, ...}
     // Tum extmark'lari temizle
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clearAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m) return;
-            m->clearAll();
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            ec->mgr->clearAll();
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
-    // extmarks.setWithVirtText(ns, startLine, startCol, endLine, endCol, virtText, virtTextPos, virtStyle?, type?, data?) -> id
+    // extmarks.setWithVirtText(ns, startLine, startCol, endLine, endCol, virtText, virtTextPos, virtStyle?, type?, data?) -> {ok, data: id, ...}
     // Sanal metinli yeni extmark ekle, kimligini dondur
     jsExt->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "setWithVirtText"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<ExtmarkManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 7) return;
+            auto* ec = static_cast<ExtmarkCtx*>(args.Data().As<v8::External>()->Value());
+            if (!ec || !ec->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "extmarkManager"}}, ec ? ec->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 7) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "ns, startLine, startCol, endLine, endCol, virtText, virtTextPos"}}, ec->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
@@ -231,9 +313,9 @@ void RegisterExtmarkBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorOb
             std::string type   = (args.Length() > 8) ? v8Str(iso, args[8]) : "";
             std::string data   = (args.Length() > 9) ? v8Str(iso, args[9]) : "";
 
-            int id = m->setWithVirtText(ns, sLine, sCol, eLine, eCol, vText, pos, vStyle, type, data);
-            args.GetReturnValue().Set(v8::Integer::New(iso, id));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            int id = ec->mgr->setWithVirtText(ns, sLine, sCol, eLine, eCol, vText, pos, vStyle, type, data);
+            V8Response::ok(args, id);
+        }, v8::External::New(isolate, ectx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

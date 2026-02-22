@@ -1,40 +1,57 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "FoldBinding.h"
 #include "BindingRegistry.h"
 #include "EditorContext.h"
+#include "V8ResponseBuilder.h"
 #include "FoldManager.h"
 #include <v8.h>
 
-// Helper: convert Fold to V8 object
-// Yardimci: Fold'u V8 nesnesine cevir
-static v8::Local<v8::Object> foldToV8(v8::Isolate* iso, v8::Local<v8::Context> ctx,
-                                        const Fold& f) {
-    v8::Local<v8::Object> obj = v8::Object::New(iso);
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "startLine"),
-        v8::Integer::New(iso, f.startLine)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "endLine"),
-        v8::Integer::New(iso, f.endLine)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "collapsed"),
-        v8::Boolean::New(iso, f.collapsed)).Check();
-    obj->Set(ctx, v8::String::NewFromUtf8Literal(iso, "label"),
-        v8::String::NewFromUtf8(iso, f.label.c_str()).ToLocalChecked()).Check();
-    return obj;
+// Helper: convert Fold to nlohmann::json
+// Yardimci: Fold'u nlohmann::json'a cevir
+static json foldToJson(const Fold& f) {
+    return json({
+        {"startLine", f.startLine},
+        {"endLine", f.endLine},
+        {"collapsed", f.collapsed},
+        {"label", f.label}
+    });
 }
 
-// Register editor.folds JS object
-// editor.folds JS nesnesini kaydet
+// Context struct for fold binding lambdas
+// Katlama binding lambda'lari icin baglam yapisi
+struct FoldCtx {
+    FoldManager* mgr;
+    I18n* i18n;
+};
+
+// Register editor.folds JS object with standard response format
+// Standart yanit formatiyla editor.folds JS nesnesini kaydet
 void RegisterFoldBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, EditorContext& edCtx) {
     auto v8ctx = isolate->GetCurrentContext();
     v8::Local<v8::Object> jsFold = v8::Object::New(isolate);
 
-    auto* mgr = edCtx.foldManager;
+    auto* fctx = new FoldCtx{edCtx.foldManager, edCtx.i18n};
 
-    // folds.create(startLine, endLine, label?) - Create a fold region
+    // folds.create(startLine, endLine, label?) -> {ok, data: true, ...}
     // Bir katlama bolgesi olustur
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "create"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 2) return;
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 2) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "startLine, endLine"}}, fc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             auto ctx = iso->GetCurrentContext();
 
@@ -45,158 +62,250 @@ void RegisterFoldBinding(v8::Isolate* isolate, v8::Local<v8::Object> editorObj, 
                 v8::String::Utf8Value s(iso, args[2]);
                 label = *s ? *s : "";
             }
-            m->create(sLine, eLine, label);
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            fc->mgr->create(sLine, eLine, label);
+            V8Response::ok(args, true, nullptr, "fold.create.success",
+                {{"start", std::to_string(sLine)}, {"end", std::to_string(eLine)}}, fc->i18n);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.remove(startLine) -> bool
+    // folds.remove(startLine) -> {ok, data: bool, ...}
     // Baslangic satirindaki katlamayi kaldir
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "remove"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "startLine"}}, fc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int sLine = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Boolean::New(iso, m->remove(sLine)));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            bool removed = fc->mgr->remove(sLine);
+            if (removed) {
+                V8Response::ok(args, true, nullptr, "fold.remove.success",
+                    {{"line", std::to_string(sLine)}}, fc->i18n);
+            } else {
+                V8Response::ok(args, false, nullptr, "fold.remove.not_found",
+                    {{"line", std::to_string(sLine)}}, fc->i18n);
+            }
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.toggle(line) -> bool
+    // folds.toggle(line) -> {ok, data: bool, ...}
     // Katlamayi degistir
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "toggle"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line"}}, fc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int line = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Boolean::New(iso, m->toggle(line)));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            bool result = fc->mgr->toggle(line);
+            V8Response::ok(args, result, nullptr, "fold.toggle.success",
+                {{"line", std::to_string(line)}}, fc->i18n);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.collapse(line) -> bool
+    // folds.collapse(line) -> {ok, data: bool, ...}
     // Katlamayi kapat
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "collapse"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line"}}, fc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int line = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Boolean::New(iso, m->collapse(line)));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            bool result = fc->mgr->collapse(line);
+            V8Response::ok(args, result, nullptr, "fold.collapse.success",
+                {{"line", std::to_string(line)}}, fc->i18n);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.expand(line) -> bool
+    // folds.expand(line) -> {ok, data: bool, ...}
     // Katlamayi ac
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "expand"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line"}}, fc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int line = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Boolean::New(iso, m->expand(line)));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            bool result = fc->mgr->expand(line);
+            V8Response::ok(args, result, nullptr, "fold.expand.success",
+                {{"line", std::to_string(line)}}, fc->i18n);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.collapseAll() - Collapse all folds
+    // folds.collapseAll() -> {ok, data: true, ...}
     // Tum katlamalari kapat
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "collapseAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m) return;
-            m->collapseAll();
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            fc->mgr->collapseAll();
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.expandAll() - Expand all folds
+    // folds.expandAll() -> {ok, data: true, ...}
     // Tum katlamalari ac
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "expandAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m) return;
-            m->expandAll();
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            fc->mgr->expandAll();
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.getFoldAt(line) -> fold | null
+    // folds.getFoldAt(line) -> {ok, data: fold|null, ...}
     // Satirdaki katlamayi al
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "getFoldAt"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            int line = args[0]->Int32Value(ctx).FromJust();
-            const Fold* f = m->getFoldAt(line);
-            if (f) {
-                args.GetReturnValue().Set(foldToV8(iso, ctx, *f));
-            } else {
-                args.GetReturnValue().SetNull();
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
             }
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line"}}, fc->i18n);
+                return;
+            }
+            auto* iso = args.GetIsolate();
+            int line = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
+            const Fold* f = fc->mgr->getFoldAt(line);
+            if (f) {
+                V8Response::ok(args, foldToJson(*f));
+            } else {
+                V8Response::ok(args, nullptr, nullptr, "fold.get.not_found",
+                    {{"line", std::to_string(line)}}, fc->i18n);
+            }
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.isLineHidden(line) -> bool
+    // folds.isLineHidden(line) -> {ok, data: bool, ...}
     // Satirin gizli olup olmadigini kontrol et
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "isLineHidden"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing", {{"name", "line"}}, fc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int line = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Boolean::New(iso, m->isLineHidden(line)));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            bool hidden = fc->mgr->isLineHidden(line);
+            V8Response::ok(args, hidden);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.list() -> [fold, ...]
+    // folds.list() -> {ok, data: [fold, ...], meta: {total: N}, ...}
     // Tum katlamalari listele
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "list"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m) return;
-            auto* iso = args.GetIsolate();
-            auto ctx = iso->GetCurrentContext();
-
-            auto folds = m->list();
-            v8::Local<v8::Array> arr = v8::Array::New(iso, static_cast<int>(folds.size()));
-            for (size_t i = 0; i < folds.size(); ++i) {
-                arr->Set(ctx, static_cast<uint32_t>(i), foldToV8(iso, ctx, folds[i])).Check();
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
             }
-            args.GetReturnValue().Set(arr);
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+
+            auto folds = fc->mgr->list();
+            json arr = json::array();
+            for (const auto& f : folds) {
+                arr.push_back(foldToJson(f));
+            }
+            json meta = {{"total", folds.size()}};
+            V8Response::ok(args, arr, meta, "fold.list.success",
+                {{"count", std::to_string(folds.size())}}, fc->i18n);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.visibleLineCount(totalLines) -> number
+    // folds.visibleLineCount(totalLines) -> {ok, data: number, ...}
     // Gorunen satir sayisini al
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "visibleLineCount"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m || args.Length() < 1) return;
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            if (args.Length() < 1) {
+                V8Response::error(args, "MISSING_ARG", "args.missing",
+                    {{"name", "totalLines"}}, fc->i18n);
+                return;
+            }
             auto* iso = args.GetIsolate();
             int total = args[0]->Int32Value(iso->GetCurrentContext()).FromJust();
-            args.GetReturnValue().Set(v8::Integer::New(iso, m->visibleLineCount(total)));
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            int visible = fc->mgr->visibleLineCount(total);
+            V8Response::ok(args, visible);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
-    // folds.clearAll() - Clear all folds
+    // folds.clearAll() -> {ok, data: true, ...}
     // Tum katlamalari temizle
     jsFold->Set(v8ctx,
         v8::String::NewFromUtf8Literal(isolate, "clearAll"),
         v8::Function::New(v8ctx, [](const v8::FunctionCallbackInfo<v8::Value>& args) {
-            auto* m = static_cast<FoldManager*>(args.Data().As<v8::External>()->Value());
-            if (!m) return;
-            m->clearAll();
-        }, v8::External::New(isolate, mgr)).ToLocalChecked()
+            auto* fc = static_cast<FoldCtx*>(args.Data().As<v8::External>()->Value());
+            if (!fc || !fc->mgr) {
+                V8Response::error(args, "NULL_CONTEXT", "internal.null_manager",
+                    {{"name", "foldManager"}}, fc ? fc->i18n : nullptr);
+                return;
+            }
+            fc->mgr->clearAll();
+            V8Response::ok(args, true);
+        }, v8::External::New(isolate, fctx)).ToLocalChecked()
     ).Check();
 
     editorObj->Set(v8ctx,

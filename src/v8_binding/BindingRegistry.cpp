@@ -1,6 +1,55 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "BindingRegistry.h"
 #include "EditorContext.h"
 #include <algorithm>
+
+// =============================================================================
+// Binding manifest: her binding burada listelenir.
+// Yeni binding eklerken buraya bir satir eklemen yeterli.
+// =============================================================================
+REGISTER_BINDING(AutoSave)
+REGISTER_BINDING(Buffer)
+REGISTER_BINDING(BufferOptions)
+REGISTER_BINDING(Buffers)
+REGISTER_BINDING(CharClassifier)
+REGISTER_BINDING(Commands)
+REGISTER_BINDING(Completion)
+REGISTER_BINDING(Config)
+REGISTER_BINDING(Cursor)
+REGISTER_BINDING(Diff)
+REGISTER_BINDING(Encoding)
+REGISTER_BINDING(Event)
+REGISTER_BINDING(Extmark)
+REGISTER_BINDING(File)
+REGISTER_BINDING(Fold)
+REGISTER_BINDING(Help)
+REGISTER_BINDING(HttpServer)
+REGISTER_BINDING(I18n)
+REGISTER_BINDING(Indent)
+REGISTER_BINDING(Input)
+REGISTER_BINDING(Keymap)
+REGISTER_BINDING(Macro)
+REGISTER_BINDING(Mark)
+REGISTER_BINDING(MultiCursor)
+REGISTER_BINDING(Plugin)
+REGISTER_BINDING(Process)
+REGISTER_BINDING(Register)
+REGISTER_BINDING(Search)
+REGISTER_BINDING(Selection)
+REGISTER_BINDING(Session)
+REGISTER_BINDING(State)
+#ifdef BERKIDE_TREESITTER_ENABLED
+REGISTER_BINDING(TreeSitter)
+#endif
+REGISTER_BINDING(Undo)
+REGISTER_BINDING(Wasm)
+REGISTER_BINDING(WebSocket)
+REGISTER_BINDING(Window)
+REGISTER_BINDING(Worker)
 
 // Singleton accessor for the global binding registry
 // Global binding kayit defterine erisim icin singleton erisimci

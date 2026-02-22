@@ -1,3 +1,8 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #pragma once
 
 // Forward declarations for all core editor components
@@ -31,6 +36,7 @@ class CharClassifier;
 class IndentEngine;
 class WorkerManager;
 class BufferOptions;
+class I18n;
 
 // Central context struct that holds pointers to all real editor objects.
 // Tum gercek editor nesnelerine isaret eden merkezi baglam yapisi.
@@ -66,4 +72,5 @@ struct EditorContext {
     IndentEngine*     indentEngine     = nullptr; // Auto-indent engine / Otomatik girinti motoru
     WorkerManager*    workerManager    = nullptr; // Background V8 worker threads / Arka plan V8 calisan thread'leri
     BufferOptions*    bufferOptions    = nullptr; // Per-buffer and global options / Buffer-bazli ve global secenekler
+    I18n*             i18n             = nullptr; // Internationalization system / Uluslararasilastirma sistemi
 };

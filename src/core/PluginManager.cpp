@@ -1,3 +1,8 @@
+// BerkIDE — No impositions.
+// Copyright (c) 2025 Berk Coşar <lookmainpoint@gmail.com>
+// Licensed under the GNU Affero General Public License v3.0.
+// See LICENSE file in the project root for full license text.
+
 #include "PluginManager.h"
 #include "V8Engine.h"
 #include "Logger.h"
@@ -131,6 +136,8 @@ bool PluginManager::loadPlugin(PluginState& ps) {
         return false;
     }
 
+    engine_->setPluginTag("[Plugin] " + ps.manifest.name);
+
     bool ok = false;
     auto ext = entryPath.extension().string();
     if (ext == ".mjs") {
@@ -138,6 +145,8 @@ bool PluginManager::loadPlugin(PluginState& ps) {
     } else {
         ok = engine_->loadScriptFromFile(entryPath.string());
     }
+
+    engine_->setPluginTag("");
 
     if (ok) {
         ps.loaded = true;

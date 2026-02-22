@@ -1,0 +1,281 @@
+// ═══════════════════════════════════════════════════════════════════
+// BerkIDE Configuration
+//
+// Priority / Oncelik sirasi:
+//   hardcoded default -> app config -> user config -> CLI argument
+//
+// Copy this file to ~/.berkide/config.jsonc to override per-user.
+// Kullanici bazli gecersiz kilmak icin ~/.berkide/config.jsonc'ye kopyala.
+// ═══════════════════════════════════════════════════════════════════
+{
+
+  // ── Server ──────────────────────────────────────────────────────
+  // HTTP REST API and WebSocket server settings.
+  // HTTP REST API ve WebSocket sunucu ayarlari.
+  "server": {
+
+    // Port for the HTTP REST API.
+    // HTTP REST API portu.
+    "http_port": 1881,
+
+    // Port for the WebSocket server.
+    // WebSocket sunucu portu.
+    "ws_port": 1882,
+
+    // Network interface to bind.
+    // Baglanilacak ag arayuzu.
+    //   "127.0.0.1" = local only (default) / sadece yerel (varsayilan)
+    //   "0.0.0.0"   = all interfaces (remote access) / tum arayuzler (uzaktan erisim)
+    "bind_address": "127.0.0.1",
+
+    // Bearer token for authentication. Empty string = auth disabled.
+    // Kimlik dogrulama icin bearer token. Bos string = auth kapali.
+    // Example / Ornek: "my-secret-token-here"
+    "token": "",
+
+    // TLS/SSL settings for HTTPS and WSS.
+    // HTTPS ve WSS icin TLS/SSL ayarlari.
+    // Requires build with -DBERKIDE_USE_TLS=ON.
+    // -DBERKIDE_USE_TLS=ON ile derleme gerektirir.
+    "tls": {
+
+      // true  = serve over HTTPS/WSS / HTTPS/WSS uzerinden sun
+      // false = plain HTTP/WS (default) / duz HTTP/WS (varsayilan)
+      "enabled": false,
+
+      // Path to TLS certificate file (PEM format).
+      // TLS sertifika dosya yolu (PEM formati).
+      // Example / Ornek: "/etc/ssl/certs/berkide.pem"
+      "cert": "",
+
+      // Path to TLS private key file (PEM format).
+      // TLS ozel anahtar dosya yolu (PEM formati).
+      // Example / Ornek: "/etc/ssl/private/berkide-key.pem"
+      "key": "",
+
+      // Path to CA bundle file for client certificate verification.
+      // Istemci sertifika dogrulamasi icin CA paketi dosya yolu.
+      // "NONE" = no client cert verification (default) / istemci sertifika dogrulamasi yok (varsayilan)
+      // Example / Ornek: "/etc/ssl/certs/ca-bundle.crt"
+      "ca": "NONE"
+    }
+  },
+
+  // ── Editor ──────────────────────────────────────────────────────
+  // Core editing behavior.
+  // Temel duzenleme davranisi.
+  "editor": {
+
+    // Number of spaces a tab character occupies visually.
+    // Bir tab karakterinin gorsel olarak kapladi bosluk sayisi.
+    "tab_width": 4,
+
+    // Number of spaces used for each indent level (>>, <<).
+    // Her girinti seviyesi icin kullanilan bosluk sayisi (>>, <<).
+    "shift_width": 4,
+
+    // true  = insert real tab characters / gercek tab karakteri ekle
+    // false = insert spaces (default) / bosluk ekle (varsayilan)
+    "use_tabs": false,
+
+    // true  = show line numbers in gutter (default) / satir numaralarini goster (varsayilan)
+    // false = hide line numbers / satir numaralarini gizle
+    "line_numbers": true,
+
+    // true  = wrap long lines visually / uzun satirlari gorsel olarak sar
+    // false = horizontal scroll (default) / yatay kaydir (varsayilan)
+    "word_wrap": false,
+
+    // Extra characters treated as part of a word (for w, e, b motions).
+    // Kelimenin parcasi olarak kabul edilen ek karakterler (w, e, b hareketleri icin).
+    // Example / Ornek: "_-$" (underscore, dash, dollar sign)
+    "extra_word_chars": "_"
+  },
+
+  // ── Completion ──────────────────────────────────────────────────
+  // Auto-completion settings.
+  // Otomatik tamamlama ayarlari.
+  "completion": {
+
+    // Maximum number of completion suggestions shown.
+    // Gosterilen maksimum tamamlama onerisi sayisi.
+    "max_results": 50,
+
+    // true  = show completions as you type (default) / yazarken tamamlamalari goster (varsayilan)
+    // false = only show on explicit trigger / sadece manuel tetiklemede goster
+    "auto_trigger": true
+  },
+
+  // ── Search ──────────────────────────────────────────────────────
+  // Find and replace defaults.
+  // Bul ve degistir varsayilanlari.
+  "search": {
+
+    // true  = match exact case (default) / buyuk/kucuk harf duyarli (varsayilan)
+    // false = ignore case / buyuk/kucuk harf farketmez
+    "case_sensitive": true,
+
+    // true  = treat search pattern as regex / arama desenini regex olarak isle
+    // false = literal string search (default) / duz metin arama (varsayilan)
+    "regex": false,
+
+    // true  = match whole words only / sadece tam kelimeleri esle
+    // false = match partial words too (default) / kismi kelimeleri de esle (varsayilan)
+    "whole_word": false,
+
+    // true  = wrap to beginning when reaching end (default) / sona ulasinca basa sar (varsayilan)
+    // false = stop at end of file / dosya sonunda dur
+    "wrap_around": true
+  },
+
+  // ── Auto-save ───────────────────────────────────────────────────
+  // Automatic backup of unsaved buffers.
+  // Kaydedilmemis buffer'larin otomatik yedeklemesi.
+  "autosave": {
+
+    // true  = enable auto-save (default) / otomatik kaydetme acik (varsayilan)
+    // false = disable auto-save / otomatik kaydetme kapali
+    "enabled": true,
+
+    // Seconds between auto-save checks. 0 = disabled.
+    // Otomatik kaydetme kontrolleri arasindaki saniye. 0 = devre disi.
+    "interval": 30
+  },
+
+  // ── Session ─────────────────────────────────────────────────────
+  // Session persistence across restarts.
+  // Yeniden baslatmalar arasinda oturum kaliciligi.
+  "session": {
+
+    // true  = save session on exit (default) / cikista oturumu kaydet (varsayilan)
+    // false = don't save session / oturumu kaydetme
+    "enabled": true,
+
+    // true  = restore last session on startup (default) / baslangiçta son oturumu geri yukle (varsayilan)
+    // false = always start fresh / her zaman temiz basla
+    "restore_on_start": true
+  },
+
+  // ── Window ──────────────────────────────────────────────────────
+  // Terminal window dimensions and split behavior.
+  // Terminal pencere boyutlari ve bolme davranisi.
+  "window": {
+
+    // Default terminal width in columns.
+    // Varsayilan terminal genisligi (sutun).
+    "width": 80,
+
+    // Default terminal height in rows.
+    // Varsayilan terminal yuksekligi (satir).
+    "height": 24,
+
+    // Default split ratio when dividing the window (0.0 - 1.0).
+    // Pencereyi bolerken varsayilan bolme orani (0.0 - 1.0).
+    //   0.5 = equal halves / esit yarimlar
+    "split_ratio": 0.5
+  },
+
+  // ── Inspector (Chrome DevTools) ─────────────────────────────────
+  // V8 Inspector for JavaScript debugging via chrome://inspect.
+  // chrome://inspect uzerinden JavaScript hata ayiklama icin V8 Inspector.
+  "inspector": {
+
+    // true  = start inspector on launch / baslatmada inspector'u ac
+    // false = inspector disabled (default) / inspector kapali (varsayilan)
+    "enabled": false,
+
+    // WebSocket port for the inspector protocol.
+    // Inspector protokolu icin WebSocket portu.
+    "port": 9229,
+
+    // true  = pause execution on first line (like --inspect-brk) / ilk satirda duraklat
+    // false = run immediately (default) / hemen calistir (varsayilan)
+    "break_on_start": false
+  },
+
+  // ── Logging ─────────────────────────────────────────────────────
+  // Application logging settings.
+  // Uygulama loglama ayarlari.
+  "log": {
+
+    // Minimum log level. Messages below this are suppressed.
+    // Minimum log seviyesi. Bu seviyenin altindaki mesajlar bastirilir.
+    //   "debug" = everything / her sey
+    //   "info"  = info + warn + error (default / varsayilan)
+    //   "warn"  = warn + error only / sadece uyari + hata
+    //   "error" = errors only / sadece hatalar
+    "level": "info",
+
+    // true  = also write logs to file / loglari dosyaya da yaz
+    // false = terminal only (default) / sadece terminal (varsayilan)
+    "file": true,
+
+    // Directory for log files, relative to the binary location.
+    // Log dosyalari icin dizin, binary konumuna goreli.
+    // Example: binary is at /opt/berkide/berkide -> logs at /opt/berkide/logs/
+    // Ornek: binary /opt/berkide/berkide'deyse -> loglar /opt/berkide/logs/ icinde
+    "path": "logs"
+  },
+
+  // ── Locale / i18n ──────────────────────────────────────────────
+  // UI language. Loads from .berkide/locales/<locale>.json.
+  // Arayuz dili. .berkide/locales/<locale>.json'dan yuklenir.
+  // Available / Mevcut: "en", "tr"
+  "locale": "en",
+
+  // ── Diff ────────────────────────────────────────────────────────
+  // Diff engine settings (Myers algorithm).
+  // Diff motoru ayarlari (Myers algoritmasi).
+  "diff": {
+
+    // Number of unchanged lines shown around each change in unified diff.
+    // Unified diff'te her degisiklik etrafinda gosterilen degismemis satir sayisi.
+    "context_lines": 3
+  },
+
+  // ── Fold ────────────────────────────────────────────────────────
+  // Code folding behavior.
+  // Kod katlama davranisi.
+  "fold": {
+
+    // true  = all foldable regions start collapsed / tum katlanabilir bolgeler kapali baslar
+    // false = all regions start expanded (default) / tum bolgeler acik baslar (varsayilan)
+    "default_collapsed": false
+  },
+
+  // ── Indent ──────────────────────────────────────────────────────
+  // Auto-indentation settings.
+  // Otomatik girinti ayarlari.
+  "indent": {
+
+    // true  = auto-indent new lines based on context (default) / baglama gore yeni satirlari otomatik girintile (varsayilan)
+    // false = no auto-indent / otomatik girinti yok
+    "auto": true
+  },
+
+  // ── Plugins ─────────────────────────────────────────────────────
+  // Plugin system settings.
+  // Eklenti sistemi ayarlari.
+  "plugins": {
+
+    // true  = load plugins from .berkide/plugins/ (default) / .berkide/plugins/'dan eklentileri yukle (varsayilan)
+    // false = skip all plugins / tum eklentileri atla
+    "enabled": true,
+
+    // true  = watch plugin files for changes, hot-reload (default) / eklenti dosyalarini izle, canli yeniden yukle (varsayilan)
+    // false = load once at startup only / sadece baslangiçta bir kez yukle
+    "watch": true
+  },
+
+  // ── TreeSitter ──────────────────────────────────────────────────
+  // Incremental syntax parsing engine.
+  // Artimli soz dizimi ayristirma motoru.
+  "treesitter": {
+
+    // true  = enable tree-sitter parsing (default) / tree-sitter ayristirmayi etkinlestir (varsayilan)
+    // false = disable (no syntax features) / devre disi birak (soz dizimi ozellikleri yok)
+    // Note: also requires build with -DBERKIDE_USE_TREESITTER=ON
+    // Not: ayrica -DBERKIDE_USE_TREESITTER=ON ile derleme gerektirir
+    "enabled": true
+  }
+}
